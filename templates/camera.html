@@ -1,0 +1,195 @@
+{% extends "base.html" %}
+{% block title %}الكاميرا{% endblock %}
+{% block content %}
+<section class="mb-6">
+  <h1 class="text-2xl font-extrabold">الكاميرا</h1>
+  <p class="text-slate-500">خلّ الطلاب يمرون قدام الكاميرا، والنظام يسجّل حضورهم مرة واحدة في اليوم.</p>
+</section>
+
+<div class="grid gap-4 lg:grid-cols-[minmax(0,1.4fr)_minmax(280px,0.8fr)]">
+  <section class="rounded-3xl bg-white p-4 shadow-sm">
+    <div class="relative overflow-hidden rounded-2xl bg-slate-900">
+      <video id="video" autoplay playsinline muted class="block aspect-video w-full object-cover"></video>
+      <canvas id="overlay" class="pointer-events-none absolute inset-0 h-full w-full"></canvas>
+      <div id="camera-status" class="absolute inset-x-4 bottom-4 rounded-2xl bg-black/60 px-4 py-3 text-sm font-semibold text-white">
+        جاري تشغيل الكاميرا...
+      </div>
+    </div>
+    <div class="mt-4 flex flex-wrap items-center justify-between gap-3">
+      <p id="scan-state" class="text-sm text-slate-500">بعد ما تظهر الصورة، التعرف يشتغل تلقائياً.</p>
+      <button id="retry-camera" type="button" class="hidden rounded-full bg-brand-600 px-4 py-2 text-sm font-bold text-white">إعادة المحاولة</button>
+    </div>
+  </section>
+
+  <aside class="space-y-4">
+    <div class="rounded-3xl bg-white p-5 shadow-sm">
+      <p class="text-sm font-semibold text-slate-500">حضر اليوم</p>
+      <p class="mt-1 text-4xl font-extrabold text-brand-700">
+        <span id="present-count">{{ present_today }}</span>
+        <span class="text-lg font-bold text-slate-400">/ <span id="total-count">{{ total_students }}</span></span>
+      </p>
+    </div>
+
+    <div id="last-match" class="hidden rounded-3xl bg-emerald-50 p-5 shadow-sm">
+      <p class="text-sm font-semibold text-brand-700">آخر طالب</p>
+      <div class="mt-3 flex items-center gap-3">
+        <img id="match-photo" alt="" class="h-16 w-16 rounded-2xl object-cover" />
+        <div>
+          <p id="match-name" class="text-lg font-extrabold"></p>
+          <p id="match-meta" class="text-sm text-slate-500"></p>
+          <p id="match-note" class="mt-1 text-sm font-bold text-brand-700"></p>
+        </div>
+      </div>
+    </div>
+
+    <div class="rounded-3xl bg-white p-5 shadow-sm">
+      <h2 class="mb-3 font-extrabold">آخر الحضور</h2>
+      <ul id="recent-list" class="space-y-3">
+        {% for record in recent[:8] %}
+        <li class="flex items-center gap-3">
+          <img src="{{ photo_url(record.student) }}" alt="" class="h-10 w-10 rounded-xl object-cover" />
+          <div class="min-w-0 flex-1">
+            <p class="truncate font-bold">{{ record.student.name }}</p>
+            <p class="text-xs text-slate-500">{{ record.student.class_name }}</p>
+          </div>
+          <span class="text-xs font-semibold text-slate-400">{{ record.checked_in_at.strftime('%H:%M') }}</span>
+        </li>
+        {% else %}
+        <li id="recent-empty" class="text-sm text-slate-500">ما سجّل أحد إلى الآن.</li>
+        {% endfor %}
+      </ul>
+    </div>
+  </aside>
+</div>
+{% endblock %}
+{% block scripts %}
+<script>
+  const video = document.getElementById("video");
+  const overlay = document.getElementById("overlay");
+  const statusBox = document.getElementById("camera-status");
+  const scanState = document.getElementById("scan-state");
+  const retryButton = document.getElementById("retry-camera");
+  const presentCount = document.getElementById("present-count");
+  const totalCount = document.getElementById("total-count");
+  const lastMatch = document.getElementById("last-match");
+  const matchPhoto = document.getElementById("match-photo");
+  const matchName = document.getElementById("match-name");
+  const matchMeta = document.getElementById("match-meta");
+  const matchNote = document.getElementById("match-note");
+  const recentList = document.getElementById("recent-list");
+  const captureCanvas = document.createElement("canvas");
+  let busy = false;
+
+  retryButton.addEventListener("click", startCamera);
+
+  async function startCamera() {
+    retryButton.classList.add("hidden");
+    statusBox.textContent = "جاري تشغيل الكاميرا...";
+    statusBox.classList.remove("hidden");
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: "user", width: 1280, height: 720 },
+        audio: false,
+      });
+      video.srcObject = stream;
+      await video.play();
+      statusBox.classList.add("hidden");
+      scanState.textContent = "الكاميرا شغالة. مرّر قدامها للتسجيل.";
+      loop();
+    } catch (error) {
+      statusBox.textContent = "ما قدرنا نفتح الكاميرا. اسمح للمتصفح يستخدمها ثم أعد المحاولة.";
+      retryButton.classList.remove("hidden");
+    }
+  }
+
+  function resizeOverlay() {
+    overlay.width = video.videoWidth || overlay.clientWidth;
+    overlay.height = video.videoHeight || overlay.clientHeight;
+  }
+
+  function drawFaces(faces) {
+    const ctx = overlay.getContext("2d");
+    resizeOverlay();
+    ctx.clearRect(0, 0, overlay.width, overlay.height);
+    faces.forEach((face) => {
+      const [x1, y1, x2, y2] = face.bbox;
+      ctx.strokeStyle = face.known ? "#10b981" : "#f59e0b";
+      ctx.lineWidth = 4;
+      ctx.strokeRect(x1, y1, x2 - x1, y2 - y1);
+      ctx.font = "700 22px Cairo";
+      const label = face.name;
+      const padding = 8;
+      const textWidth = ctx.measureText(label).width;
+      ctx.fillStyle = face.known ? "#10b981" : "#f59e0b";
+      ctx.fillRect(x1, Math.max(y1 - 34, 0), textWidth + padding * 2, 32);
+      ctx.fillStyle = "#ffffff";
+      ctx.fillText(label, x1 + padding, Math.max(y1 - 10, 22));
+    });
+  }
+
+  function updateSidebar(data) {
+    presentCount.textContent = data.present_today ?? 0;
+    totalCount.textContent = data.total_students ?? 0;
+    if (data.recent) {
+      if (!data.recent.length) {
+        recentList.innerHTML = '<li class="text-sm text-slate-500">ما سجّل أحد إلى الآن.</li>';
+      } else {
+        recentList.innerHTML = data.recent.map((item) => `
+          <li class="flex items-center gap-3">
+            <img src="${item.photo}" alt="" class="h-10 w-10 rounded-xl object-cover" />
+            <div class="min-w-0 flex-1">
+              <p class="truncate font-bold">${item.name}</p>
+              <p class="text-xs text-slate-500">${item.class_name}</p>
+            </div>
+            <span class="text-xs font-semibold text-slate-400">${item.time}</span>
+          </li>
+        `).join("");
+      }
+    }
+  }
+
+  function showMatch(face) {
+    lastMatch.classList.remove("hidden");
+    matchPhoto.src = face.photo;
+    matchName.textContent = face.name;
+    matchMeta.textContent = `${face.class_name} · رقم ${face.student_number}`;
+    matchNote.textContent = face.marked_now ? "تم تسجيل الحضور" : "مسجّل مسبقاً اليوم";
+  }
+
+  async function recognizeFrame() {
+    if (busy || video.readyState < 2) return;
+    busy = true;
+    captureCanvas.width = video.videoWidth;
+    captureCanvas.height = video.videoHeight;
+    captureCanvas.getContext("2d").drawImage(video, 0, 0);
+    const blob = await new Promise((resolve) => captureCanvas.toBlob(resolve, "image/jpeg", 0.8));
+    if (!blob) {
+      busy = false;
+      return;
+    }
+    const body = new FormData();
+    body.append("image", blob, "frame.jpg");
+    try {
+      const response = await fetch("/api/recognize", { method: "POST", body });
+      const data = await response.json();
+      drawFaces(data.faces || []);
+      updateSidebar(data);
+      const known = (data.faces || []).find((face) => face.known);
+      if (known) showMatch(known);
+      const count = (data.faces || []).length;
+      scanState.textContent = count ? `لقينا ${count} وجه في الإطار` : "ما فيه وجه واضح الآن";
+    } catch (error) {
+      scanState.textContent = "صار خطأ أثناء التعرف. نعيد المحاولة...";
+    } finally {
+      busy = false;
+    }
+  }
+
+  async function loop() {
+    await recognizeFrame();
+    setTimeout(loop, 1000);
+  }
+
+  startCamera();
+</script>
+{% endblock %}

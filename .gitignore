@@ -1,0 +1,13 @@
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.db
+.DS_Store
+data/sahal.db
+data/models/
+data/photos/*
+!data/photos/.gitkeep
+.insightface/
+node_modules/
+frontend/dist/

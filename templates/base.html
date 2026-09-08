@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{% block title %}سهل{% endblock %} — حضور الطلاب</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700;800&display=swap" rel="stylesheet" />
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+      tailwind.config = {
+        theme: {
+          extend: {
+            fontFamily: { sans: ["Cairo", "sans-serif"] },
+            colors: {
+              ink: "#12231c",
+              paper: "#f4f7f5",
+              brand: {
+                50: "#ecfdf5",
+                100: "#d1fae5",
+                500: "#10b981",
+                600: "#059669",
+                700: "#047857",
+              },
+            },
+          },
+        },
+      };
+    </script>
+    <style>
+      body { background: #f4f7f5; }
+      .nav-link.active { background: #ecfdf5; color: #047857; }
+    </style>
+  </head>
+  <body class="min-h-screen font-sans text-ink antialiased">
+    <div class="mx-auto flex min-h-screen max-w-6xl flex-col px-4 py-6 sm:px-6">
+      <header class="mb-6 flex flex-col gap-4 rounded-3xl bg-white p-4 shadow-sm sm:flex-row sm:items-center sm:justify-between">
+        <a href="/students" class="flex items-center gap-3">
+          <span class="grid h-12 w-12 place-items-center rounded-2xl bg-brand-600 text-lg font-extrabold text-white">س</span>
+          <span>
+            <span class="block text-xl font-extrabold">سهل</span>
+            <span class="block text-sm text-slate-500">نظام حضور الطلاب</span>
+          </span>
+        </a>
+        <nav class="flex flex-wrap gap-2">
+          <a href="/students" class="nav-link rounded-full px-4 py-2 text-sm font-semibold text-slate-600 hover:bg-brand-50 {% if active == 'students' %}active{% endif %}">الطلاب</a>
+          <a href="/camera" class="nav-link rounded-full px-4 py-2 text-sm font-semibold text-slate-600 hover:bg-brand-50 {% if active == 'camera' %}active{% endif %}">الكاميرا</a>
+          <a href="/attendance" class="nav-link rounded-full px-4 py-2 text-sm font-semibold text-slate-600 hover:bg-brand-50 {% if active == 'attendance' %}active{% endif %}">سجل الحضور</a>
+        </nav>
+      </header>
+      <main class="flex-1">{% block content %}{% endblock %}</main>
+    </div>
+    {% block scripts %}{% endblock %}
+  </body>
+</html>

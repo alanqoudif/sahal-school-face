@@ -1,0 +1,682 @@
+import uuid
+from contextlib import asynccontextmanager
+from datetime import date, datetime
+from pathlib import Path
+from urllib.parse import quote
+
+import cv2
+import numpy as np
+from fastapi import Depends, FastAPI, File, Form, Request, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
+from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
+from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session
+
+from app.cameras import fetch_camera_frame
+from app.cues import analyze_cues
+from app.db import BASE_DIR, PHOTOS_DIR, get_db, init_db
+from app.excel_export import attendance_workbook
+from app.face import (
+    MATCH_THRESHOLD,
+    cosine_similarity,
+    decode_image,
+    detect_faces,
+    embedding_from_json,
+    embedding_to_json,
+    extract_embedding,
+)
+from app.models import DEFAULT_SECTION, Attendance, Classroom, Student
+from app.seats import classroom_seats, seat_label
+
+TEMPLATES_DIR = BASE_DIR / "templates"
+STATIC_DIR = BASE_DIR / "static"
+FRONTEND_DIST = BASE_DIR / "frontend" / "dist"
+ALLOWED_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp"}
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    init_db()
+    STATIC_DIR.mkdir(parents=True, exist_ok=True)
+    yield
+
+
+app = FastAPI(title="سهل", lifespan=lifespan)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://127.0.0.1:5173", "http://localhost:5173"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+app.mount("/photos", StaticFiles(directory=PHOTOS_DIR), name="photos")
+templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
+
+
+def uses_spa() -> bool:
+    return (FRONTEND_DIST / "index.html").exists()
+
+
+def spa_page():
+    return FileResponse(FRONTEND_DIST / "index.html")
+
+
+def render(request: Request, name: str, **context):
+    return templates.TemplateResponse(request, name, context)
+
+
+def page_or_spa(request: Request, name: str, **context):
+    if uses_spa():
+        return spa_page()
+    return render(request, name, **context)
+
+
+def photo_url(student: Student) -> str:
+    return f"/photos/{Path(student.photo_path).name}"
+
+
+def today() -> date:
+    return date.today()
+
+
+def count_students(db: Session) -> int:
+    return db.scalar(select(func.count()).select_from(Student)) or 0
+
+
+def count_present(db: Session, day: date, classroom_id: int | None = None) -> int:
+    query = select(func.count()).select_from(Attendance).where(Attendance.day == day)
+    if classroom_id:
+        query = query.where(Attendance.classroom_id == classroom_id)
+    return db.scalar(query) or 0
+
+
+def save_photo(image, student_number: str) -> str:
+    filename = f"{student_number}_{uuid.uuid4().hex[:8]}.jpg"
+    path = PHOTOS_DIR / filename
+    cv2.imwrite(str(path), image)
+    return str(path)
+
+
+def get_or_create_classroom(db: Session, grade: str, section: str) -> Classroom:
+    grade = grade.strip()
+    section = (section or DEFAULT_SECTION).strip() or DEFAULT_SECTION
+    classroom = db.scalar(select(Classroom).where(Classroom.grade == grade, Classroom.section == section))
+    if classroom is None:
+        classroom = Classroom(grade=grade, section=section)
+        db.add(classroom)
+        db.flush()
+    return classroom
+
+
+def student_payload(student: Student) -> dict:
+    classroom = student.classroom
+    return {
+        "id": student.id,
+        "name": student.name,
+        "student_number": student.student_number,
+        "class_name": student.class_name,
+        "section": student.section or DEFAULT_SECTION,
+        "classroom_id": student.classroom_id,
+        "classroom_title": classroom.title if classroom else f"الصف {student.class_name} — الشعبة {student.section or DEFAULT_SECTION}",
+        "seat_code": student.seat_code,
+        "seat_label": seat_label(student.seat_code),
+        "photo": photo_url(student),
+    }
+
+
+def classroom_payload(classroom: Classroom, db: Session, day: date | None = None) -> dict:
+    day = day or today()
+    students = list(classroom.students)
+    present_ids = {
+        record.student_id
+        for record in db.scalars(
+            select(Attendance).where(Attendance.day == day, Attendance.classroom_id == classroom.id)
+        ).all()
+    }
+    occupied = {student.seat_code: student_payload(student) for student in students if student.seat_code}
+    return {
+        "id": classroom.id,
+        "grade": classroom.grade,
+        "section": classroom.section,
+        "title": classroom.title,
+        "rows": classroom.rows or 4,
+        "camera_ip": classroom.camera_ip or "",
+        "camera_url": classroom.camera_url or "",
+        "camera_user": classroom.camera_user or "",
+        "camera_kind": classroom.camera_kind or "snapshot",
+        "has_camera": bool(classroom.camera_url or classroom.camera_ip),
+        "student_count": len(students),
+        "present_today": len(present_ids),
+        "seats": [
+            {
+                **seat,
+                "student": occupied.get(seat["code"]),
+                "present": occupied[seat["code"]]["id"] in present_ids if seat["code"] in occupied else False,
+            }
+            for seat in classroom_seats(classroom.rows or 4)
+        ],
+    }
+
+
+def _attendance_payload(record: Attendance) -> dict:
+    student = record.student
+    classroom = record.classroom or student.classroom
+    return {
+        "id": record.id,
+        "name": student.name,
+        "class_name": student.class_name,
+        "section": student.section or DEFAULT_SECTION,
+        "student_number": student.student_number,
+        "time": record.checked_in_at.strftime("%H:%M"),
+        "photo": photo_url(student),
+        "seat_label": seat_label(student.seat_code),
+        "classroom_id": record.classroom_id,
+        "classroom_title": classroom.title if classroom else student.class_name,
+        "expression": record.expression or "",
+        "attention": record.attention or "",
+        "quality": record.quality or "",
+    }
+
+
+def recognize_image(frame, db: Session, classroom: Classroom | None = None) -> dict:
+    query = select(Student)
+    if classroom:
+        query = query.where(Student.classroom_id == classroom.id)
+    students = db.scalars(query).all()
+    catalog = [(student, embedding_from_json(student.embedding)) for student in students if student.embedding]
+    day = today()
+    now = datetime.now()
+    marked_ids: set[int] = set()
+    faces_payload = []
+
+    for face in detect_faces(frame):
+        embedding = np.asarray(face.normed_embedding, dtype=np.float32)
+        match, score = _best_match(embedding, catalog)
+        cues = analyze_cues(frame, face)
+        item = {
+            "bbox": [int(v) for v in face.bbox.tolist()],
+            "known": False,
+            "name": "غير معروف",
+            "student_id": None,
+            "student_number": None,
+            "class_name": None,
+            "section": None,
+            "confidence": round(score, 3) if score > 0 else 0,
+            "already_marked": False,
+            "marked_now": False,
+            "photo": None,
+            "seat_label": None,
+            **cues,
+        }
+        if match and score >= MATCH_THRESHOLD:
+            existing = db.scalar(
+                select(Attendance).where(Attendance.student_id == match.id, Attendance.day == day)
+            )
+            marked_now = False
+            if existing is None and match.id not in marked_ids:
+                db.add(
+                    Attendance(
+                        student_id=match.id,
+                        classroom_id=classroom.id if classroom else match.classroom_id,
+                        day=day,
+                        checked_in_at=now,
+                        expression=cues["expression"],
+                        attention=cues["attention"],
+                        quality=cues["quality"],
+                    )
+                )
+                marked_now = True
+                marked_ids.add(match.id)
+            elif existing is not None and not (existing.expression or existing.attention or existing.quality):
+                existing.expression = cues["expression"]
+                existing.attention = cues["attention"]
+                existing.quality = cues["quality"]
+            item.update(
+                {
+                    "known": True,
+                    "name": match.name,
+                    "student_id": match.id,
+                    "student_number": match.student_number,
+                    "class_name": match.class_name,
+                    "section": match.section,
+                    "confidence": round(score, 3),
+                    "already_marked": existing is not None,
+                    "marked_now": marked_now,
+                    "photo": photo_url(match),
+                    "seat_label": seat_label(match.seat_code),
+                }
+            )
+        faces_payload.append(item)
+
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+
+    recent_query = select(Attendance).where(Attendance.day == day).order_by(Attendance.checked_in_at.desc())
+    if classroom:
+        recent_query = recent_query.where(Attendance.classroom_id == classroom.id)
+    return {
+        "faces": faces_payload,
+        "present_today": count_present(db, day, classroom.id if classroom else None),
+        "total_students": len(students) if classroom else count_students(db),
+        "recent": [_attendance_payload(record) for record in db.scalars(recent_query).all()[:8]],
+        "classroom_id": classroom.id if classroom else None,
+    }
+
+
+def _best_match(embedding, catalog):
+    best_student = None
+    best_score = -1.0
+    for student, stored in catalog:
+        score = cosine_similarity(embedding, stored)
+        if score > best_score:
+            best_score = score
+            best_student = student
+    return best_student, best_score
+
+
+def _parse_day(value: str | None) -> date:
+    if not value:
+        return today()
+    try:
+        return date.fromisoformat(value)
+    except ValueError:
+        return today()
+
+
+def _students_error(message: str) -> RedirectResponse:
+    return RedirectResponse(f"/students?error={quote(message)}", status_code=303)
+
+
+@app.get("/assets/{asset_path:path}", include_in_schema=False)
+def frontend_asset(asset_path: str):
+    file_path = (FRONTEND_DIST / "assets" / asset_path).resolve()
+    assets_root = (FRONTEND_DIST / "assets").resolve()
+    if file_path.exists() and file_path.is_relative_to(assets_root):
+        return FileResponse(file_path)
+    return JSONResponse({"detail": "Not Found"}, status_code=404)
+
+
+@app.get("/", include_in_schema=False)
+def home():
+    if uses_spa():
+        return spa_page()
+    return RedirectResponse("/students", status_code=303)
+
+
+@app.get("/students", response_class=HTMLResponse)
+@app.get("/camera", response_class=HTMLResponse)
+@app.get("/attendance", response_class=HTMLResponse)
+@app.get("/classes", response_class=HTMLResponse)
+@app.get("/classes/{classroom_id}", response_class=HTMLResponse)
+def spa_routes(request: Request, classroom_id: int | None = None):
+    return page_or_spa(request, "students.html", active="students")
+
+
+@app.get("/api/classrooms")
+def api_classrooms(db: Session = Depends(get_db)):
+    classrooms = db.scalars(select(Classroom).order_by(Classroom.grade, Classroom.section)).all()
+    return {"classrooms": [classroom_payload(item, db) for item in classrooms]}
+
+
+@app.post("/api/classrooms")
+def api_create_classroom(
+    grade: str = Form(...),
+    section: str = Form(DEFAULT_SECTION),
+    db: Session = Depends(get_db),
+):
+    grade = grade.strip()
+    section = (section or DEFAULT_SECTION).strip() or DEFAULT_SECTION
+    if not grade:
+        return JSONResponse({"ok": False, "error": "اكتب اسم الصف"}, status_code=400)
+    existing = db.scalar(select(Classroom).where(Classroom.grade == grade, Classroom.section == section))
+    if existing:
+        return JSONResponse({"ok": False, "error": "هذا الصف والشعبة موجودين"}, status_code=400)
+    classroom = Classroom(grade=grade, section=section)
+    db.add(classroom)
+    db.commit()
+    db.refresh(classroom)
+    return {"ok": True, "classroom": classroom_payload(classroom, db)}
+
+
+@app.get("/api/classrooms/{classroom_id}")
+def api_classroom(classroom_id: int, db: Session = Depends(get_db)):
+    classroom = db.get(Classroom, classroom_id)
+    if not classroom:
+        return JSONResponse({"error": "الصف غير موجود"}, status_code=404)
+    students = db.scalars(select(Student).where(Student.classroom_id == classroom_id).order_by(Student.name)).all()
+    return {
+        "classroom": classroom_payload(classroom, db),
+        "students": [student_payload(student) for student in students],
+    }
+
+
+@app.put("/api/classrooms/{classroom_id}")
+def api_update_classroom(
+    classroom_id: int,
+    camera_ip: str = Form(""),
+    camera_url: str = Form(""),
+    camera_user: str = Form(""),
+    camera_password: str = Form(""),
+    camera_kind: str = Form("snapshot"),
+    db: Session = Depends(get_db),
+):
+    classroom = db.get(Classroom, classroom_id)
+    if not classroom:
+        return JSONResponse({"ok": False, "error": "الصف غير موجود"}, status_code=404)
+    classroom.camera_ip = camera_ip.strip() or None
+    classroom.camera_url = camera_url.strip() or None
+    classroom.camera_user = camera_user.strip() or None
+    if camera_password.strip():
+        classroom.camera_password = camera_password.strip()
+    classroom.camera_kind = camera_kind if camera_kind in {"snapshot", "rtsp"} else "snapshot"
+    db.commit()
+    db.refresh(classroom)
+    return {"ok": True, "classroom": classroom_payload(classroom, db)}
+
+
+@app.post("/api/classrooms/{classroom_id}/seats/{seat_code}")
+def api_assign_seat(
+    classroom_id: int,
+    seat_code: str,
+    student_id: int = Form(...),
+    db: Session = Depends(get_db),
+):
+    classroom = db.get(Classroom, classroom_id)
+    student = db.get(Student, student_id)
+    if not classroom or not student or student.classroom_id != classroom_id:
+        return JSONResponse({"ok": False, "error": "الطالب مو من هذا الصف"}, status_code=400)
+    taken = db.scalar(
+        select(Student).where(
+            Student.classroom_id == classroom_id,
+            Student.seat_code == seat_code,
+            Student.id != student_id,
+        )
+    )
+    if taken:
+        return JSONResponse({"ok": False, "error": f"المقعد محجوز لـ {taken.name}"}, status_code=400)
+    student.seat_code = seat_code
+    db.commit()
+    return {"ok": True, "classroom": classroom_payload(classroom, db), "student": student_payload(student)}
+
+
+@app.delete("/api/classrooms/{classroom_id}/seats/{seat_code}")
+def api_clear_seat(classroom_id: int, seat_code: str, db: Session = Depends(get_db)):
+    student = db.scalar(
+        select(Student).where(Student.classroom_id == classroom_id, Student.seat_code == seat_code)
+    )
+    if student:
+        student.seat_code = None
+        db.commit()
+    classroom = db.get(Classroom, classroom_id)
+    return {"ok": True, "classroom": classroom_payload(classroom, db) if classroom else None}
+
+
+@app.get("/api/classrooms/{classroom_id}/snapshot")
+def api_classroom_snapshot(classroom_id: int, db: Session = Depends(get_db)):
+    classroom = db.get(Classroom, classroom_id)
+    if not classroom:
+        return JSONResponse({"error": "الصف غير موجود"}, status_code=404)
+    try:
+        frame = fetch_camera_frame(classroom)
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    ok, encoded = cv2.imencode(".jpg", frame)
+    if not ok:
+        return JSONResponse({"error": "تعذر تجهيز صورة الكاميرا"}, status_code=500)
+    return StreamingResponse(iter([encoded.tobytes()]), media_type="image/jpeg")
+
+
+@app.post("/api/classrooms/{classroom_id}/recognize")
+async def api_classroom_recognize(
+    classroom_id: int,
+    image: UploadFile | None = File(None),
+    db: Session = Depends(get_db),
+):
+    classroom = db.get(Classroom, classroom_id)
+    if not classroom:
+        return JSONResponse({"error": "الصف غير موجود"}, status_code=404)
+    if image and image.filename:
+        data = await image.read()
+        try:
+            frame = decode_image(data)
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+    else:
+        try:
+            frame = fetch_camera_frame(classroom)
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+    return recognize_image(frame, db, classroom)
+
+
+@app.get("/api/students")
+def api_students(db: Session = Depends(get_db)):
+    students = db.scalars(select(Student).order_by(Student.class_name, Student.section, Student.name)).all()
+    return {"students": [student_payload(student) for student in students]}
+
+
+@app.post("/api/students")
+async def api_create_student(
+    name: str = Form(...),
+    student_number: str = Form(...),
+    class_name: str = Form(...),
+    section: str = Form(DEFAULT_SECTION),
+    classroom_id: str = Form(""),
+    seat_code: str = Form(""),
+    photo: UploadFile | None = File(None),
+    db: Session = Depends(get_db),
+):
+    name = name.strip()
+    student_number = student_number.strip()
+    class_name = class_name.strip()
+    section = (section or DEFAULT_SECTION).strip() or DEFAULT_SECTION
+    if not name or not student_number or (not class_name and not classroom_id):
+        return JSONResponse({"ok": False, "error": "أكمل كل الحقول المطلوبة"}, status_code=400)
+    if photo is None or not photo.filename:
+        return JSONResponse({"ok": False, "error": "ارفع صورة للطالب"}, status_code=400)
+    suffix = Path(photo.filename).suffix.lower()
+    if suffix not in ALLOWED_SUFFIXES:
+        return JSONResponse({"ok": False, "error": "الصورة لازم تكون JPG أو PNG"}, status_code=400)
+    data = await photo.read()
+    if not data:
+        return JSONResponse({"ok": False, "error": "ارفع صورة للطالب"}, status_code=400)
+    try:
+        image = decode_image(data)
+        embedding = extract_embedding(image)
+    except ValueError as exc:
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+
+    if classroom_id:
+        classroom = db.get(Classroom, int(classroom_id))
+        if not classroom:
+            return JSONResponse({"ok": False, "error": "الصف غير موجود"}, status_code=400)
+    else:
+        classroom = get_or_create_classroom(db, class_name, section)
+
+    photo_path = save_photo(image, student_number)
+    student = Student(
+        name=name,
+        student_number=student_number,
+        class_name=classroom.grade,
+        section=classroom.section,
+        classroom_id=classroom.id,
+        seat_code=seat_code or None,
+        photo_path=photo_path,
+        embedding=embedding_to_json(embedding),
+    )
+    db.add(student)
+    try:
+        db.commit()
+        db.refresh(student)
+    except IntegrityError:
+        db.rollback()
+        Path(photo_path).unlink(missing_ok=True)
+        return JSONResponse({"ok": False, "error": "رقم الطالب مستخدم من قبل"}, status_code=400)
+    return {"ok": True, "student": student_payload(student)}
+
+
+@app.put("/api/students/{student_id}")
+async def api_update_student(
+    student_id: int,
+    name: str = Form(...),
+    student_number: str = Form(...),
+    class_name: str = Form(...),
+    section: str = Form(DEFAULT_SECTION),
+    seat_code: str = Form(""),
+    photo: UploadFile | None = File(None),
+    db: Session = Depends(get_db),
+):
+    student = db.get(Student, student_id)
+    if not student:
+        return JSONResponse({"ok": False, "error": "الطالب غير موجود"}, status_code=404)
+    name = name.strip()
+    student_number = student_number.strip()
+    class_name = class_name.strip()
+    section = (section or DEFAULT_SECTION).strip() or DEFAULT_SECTION
+    if not name or not student_number or not class_name:
+        return JSONResponse({"ok": False, "error": "أكمل كل الحقول المطلوبة"}, status_code=400)
+
+    if photo and photo.filename:
+        suffix = Path(photo.filename).suffix.lower()
+        if suffix not in ALLOWED_SUFFIXES:
+            return JSONResponse({"ok": False, "error": "الصورة لازم تكون JPG أو PNG"}, status_code=400)
+        data = await photo.read()
+        try:
+            image = decode_image(data)
+            embedding = extract_embedding(image)
+        except ValueError as exc:
+            return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+        Path(student.photo_path).unlink(missing_ok=True)
+        student.photo_path = save_photo(image, student_number)
+        student.embedding = embedding_to_json(embedding)
+
+    classroom = get_or_create_classroom(db, class_name, section)
+    if student.classroom_id != classroom.id:
+        student.seat_code = seat_code or None
+    elif seat_code:
+        student.seat_code = seat_code
+    student.name = name
+    student.student_number = student_number
+    student.class_name = classroom.grade
+    student.section = classroom.section
+    student.classroom_id = classroom.id
+    try:
+        db.commit()
+        db.refresh(student)
+    except IntegrityError:
+        db.rollback()
+        return JSONResponse({"ok": False, "error": "رقم الطالب مستخدم من قبل"}, status_code=400)
+    return {"ok": True, "student": student_payload(student)}
+
+
+@app.delete("/api/students/{student_id}")
+def api_delete_student(student_id: int, db: Session = Depends(get_db)):
+    student = db.get(Student, student_id)
+    if student:
+        Path(student.photo_path).unlink(missing_ok=True)
+        db.delete(student)
+        db.commit()
+    return {"ok": True}
+
+
+@app.get("/api/attendance")
+def api_attendance(
+    day: str | None = None,
+    classroom_id: int | None = None,
+    class_name: str | None = None,
+    db: Session = Depends(get_db),
+):
+    selected_day = _parse_day(day)
+    classrooms = db.scalars(select(Classroom).order_by(Classroom.grade, Classroom.section)).all()
+    students_query = select(Student)
+    records_query = (
+        select(Attendance)
+        .join(Student)
+        .where(Attendance.day == selected_day)
+        .order_by(Attendance.checked_in_at.desc())
+    )
+    if classroom_id:
+        students_query = students_query.where(Student.classroom_id == classroom_id)
+        records_query = records_query.where(Attendance.classroom_id == classroom_id)
+    elif class_name:
+        students_query = students_query.where(Student.class_name == class_name)
+        records_query = records_query.where(Student.class_name == class_name)
+
+    students = db.scalars(students_query).all()
+    records = db.scalars(records_query).all()
+    present_ids = {record.student_id for record in records}
+    absent = [student_payload(student) for student in students if student.id not in present_ids]
+    return {
+        "selected_day": selected_day.isoformat(),
+        "classroom_id": classroom_id,
+        "classrooms": [{"id": item.id, "title": item.title} for item in classrooms],
+        "present_count": len(records),
+        "absent_count": len(absent),
+        "total_students": len(students),
+        "records": [{**_attendance_payload(record), "date": record.day.isoformat()} for record in records],
+        "absent": absent,
+    }
+
+
+@app.get("/attendance/export")
+def export_attendance(day: str | None = None, db: Session = Depends(get_db)):
+    selected_day = _parse_day(day)
+    classrooms = db.scalars(select(Classroom).order_by(Classroom.grade, Classroom.section)).all()
+    records = db.scalars(select(Attendance).where(Attendance.day == selected_day)).all()
+    present_by_student = {record.student_id: record for record in records}
+    output = attendance_workbook(selected_day, classrooms, present_by_student)
+    filename = f"attendance-{selected_day.isoformat()}.xlsx"
+    return StreamingResponse(
+        output,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@app.get("/api/stats")
+def api_stats(db: Session = Depends(get_db)):
+    day = today()
+    records = db.scalars(
+        select(Attendance).where(Attendance.day == day).order_by(Attendance.checked_in_at.desc())
+    ).all()
+    return {
+        "present_today": len(records),
+        "total_students": count_students(db),
+        "recent": [_attendance_payload(record) for record in records[:8]],
+    }
+
+
+@app.post("/api/recognize")
+async def recognize(
+    image: UploadFile = File(...),
+    classroom_id: int | None = Form(None),
+    db: Session = Depends(get_db),
+):
+    data = await image.read()
+    if not data:
+        return {"faces": [], "present_today": count_present(db, today()), "total_students": count_students(db)}
+    try:
+        frame = decode_image(data)
+    except ValueError:
+        return {"faces": [], "error": "تعذر قراءة الإطار"}
+    classroom = db.get(Classroom, classroom_id) if classroom_id else None
+    return recognize_image(frame, db, classroom)
+
+
+@app.post("/students")
+async def create_student_form(
+    name: str = Form(...),
+    student_number: str = Form(...),
+    class_name: str = Form(...),
+    photo: UploadFile | None = File(None),
+    db: Session = Depends(get_db),
+):
+    result = await api_create_student(name, student_number, class_name, DEFAULT_SECTION, "", "", photo, db)
+    if isinstance(result, JSONResponse):
+        return _students_error("تعذر إضافة الطالب")
+    return RedirectResponse("/students", status_code=303)

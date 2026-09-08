@@ -1,0 +1,88 @@
+{% extends "base.html" %}
+{% block title %}سجل الحضور{% endblock %}
+{% block content %}
+<section class="mb-6 flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+  <div>
+    <h1 class="text-2xl font-extrabold">سجل الحضور</h1>
+    <p class="text-slate-500">شوف مين حضر، فلتر حسب التاريخ أو الصف، وصدر الملف لإكسل.</p>
+  </div>
+  <a
+    href="/attendance/export?day={{ selected_day }}&class_name={{ selected_class }}"
+    class="rounded-full bg-brand-600 px-5 py-2.5 text-sm font-bold text-white hover:bg-brand-700"
+  >
+    تصدير CSV
+  </a>
+</section>
+
+<form method="get" action="/attendance" class="mb-6 grid gap-3 rounded-3xl bg-white p-4 shadow-sm sm:grid-cols-[1fr_1fr_auto]">
+  <label class="grid gap-1 text-sm font-semibold">
+    التاريخ
+    <input type="date" name="day" value="{{ selected_day }}" class="rounded-2xl border border-slate-200 px-3 py-2.5 font-normal outline-none focus:border-brand-500" />
+  </label>
+  <label class="grid gap-1 text-sm font-semibold">
+    الصف
+    <select name="class_name" class="rounded-2xl border border-slate-200 px-3 py-2.5 font-normal outline-none focus:border-brand-500">
+      <option value="">كل الصفوف</option>
+      {% for item in classes %}
+      <option value="{{ item }}" {% if item == selected_class %}selected{% endif %}>{{ item }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <button type="submit" class="self-end rounded-full bg-ink px-5 py-2.5 text-sm font-bold text-white">تصفية</button>
+</form>
+
+<div class="mb-6 grid gap-3 sm:grid-cols-3">
+  <div class="rounded-3xl bg-white p-5 shadow-sm">
+    <p class="text-sm text-slate-500">حاضر</p>
+    <p class="text-3xl font-extrabold text-brand-700">{{ present_count }}</p>
+  </div>
+  <div class="rounded-3xl bg-white p-5 shadow-sm">
+    <p class="text-sm text-slate-500">غائب</p>
+    <p class="text-3xl font-extrabold text-amber-600">{{ absent_count }}</p>
+  </div>
+  <div class="rounded-3xl bg-white p-5 shadow-sm">
+    <p class="text-sm text-slate-500">إجمالي الطلاب</p>
+    <p class="text-3xl font-extrabold">{{ total_students }}</p>
+  </div>
+</div>
+
+<div class="overflow-hidden rounded-3xl bg-white shadow-sm">
+  {% if records %}
+  <div class="overflow-x-auto">
+    <table class="min-w-full text-right">
+      <thead class="bg-slate-50 text-sm text-slate-500">
+        <tr>
+          <th class="px-4 py-3 font-semibold">الطالب</th>
+          <th class="px-4 py-3 font-semibold">رقم الطالب</th>
+          <th class="px-4 py-3 font-semibold">الصف</th>
+          <th class="px-4 py-3 font-semibold">وقت الدخول</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for record in records %}
+        <tr class="border-t border-slate-100">
+          <td class="px-4 py-3">
+            <div class="flex items-center gap-3">
+              <img src="{{ photo_url(record.student) }}" alt="" class="h-10 w-10 rounded-xl object-cover" />
+              <span class="font-bold">{{ record.student.name }}</span>
+            </div>
+          </td>
+          <td class="px-4 py-3 text-slate-600">{{ record.student.student_number }}</td>
+          <td class="px-4 py-3">
+            <span class="rounded-full bg-brand-50 px-2.5 py-1 text-xs font-bold text-brand-700">{{ record.student.class_name }}</span>
+          </td>
+          <td class="px-4 py-3 font-semibold text-slate-600">{{ record.checked_in_at.strftime('%H:%M') }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <div class="px-6 py-16 text-center">
+    <p class="text-lg font-bold">ما فيه حضور لهذا اليوم</p>
+    <p class="mt-1 text-slate-500">افتح صفحة الكاميرا وسجّل الطلاب لما يمرون.</p>
+    <a href="/camera" class="mt-5 inline-block rounded-full bg-brand-600 px-5 py-2.5 text-sm font-bold text-white">فتح الكاميرا</a>
+  </div>
+  {% endif %}
+</div>
+{% endblock %}

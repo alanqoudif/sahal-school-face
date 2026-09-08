@@ -1,0 +1,84 @@
+{% extends "base.html" %}
+{% block title %}الطلاب{% endblock %}
+{% block content %}
+<section class="mb-6 flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+  <div>
+    <h1 class="text-2xl font-extrabold">الطلاب</h1>
+    <p class="text-slate-500">أضف صورة واضحة لوجه الطالب مع بياناته، وبعدها الكاميرا تتعرّف عليه.</p>
+  </div>
+  <button type="button" onclick="document.getElementById('add-modal').showModal()" class="rounded-full bg-brand-600 px-5 py-2.5 text-sm font-bold text-white hover:bg-brand-700">
+    إضافة طالب
+  </button>
+</section>
+
+{% if error %}
+<p class="mb-4 rounded-2xl bg-red-50 px-4 py-3 text-sm font-semibold text-red-700">{{ error }}</p>
+{% endif %}
+
+{% if students %}
+<div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+  {% for student in students %}
+  <article class="rounded-3xl bg-white p-4 shadow-sm">
+    <div class="flex items-center gap-4">
+      <img src="{{ photo_url(student) }}" alt="{{ student.name }}" class="h-20 w-20 rounded-2xl object-cover" />
+      <div class="min-w-0 flex-1">
+        <h2 class="truncate text-lg font-extrabold">{{ student.name }}</h2>
+        <p class="text-sm text-slate-500">رقم {{ student.student_number }}</p>
+        <p class="mt-1 inline-flex rounded-full bg-brand-50 px-2.5 py-1 text-xs font-bold text-brand-700">{{ student.class_name }}</p>
+      </div>
+    </div>
+    <form method="post" action="/students/{{ student.id }}/delete" class="mt-4 text-left" onsubmit="return confirm('تحذف {{ student.name }}؟')">
+      <button type="submit" class="text-sm font-semibold text-red-600 hover:underline">حذف</button>
+    </form>
+  </article>
+  {% endfor %}
+</div>
+{% else %}
+<div class="rounded-3xl bg-white px-6 py-16 text-center shadow-sm">
+  <p class="text-lg font-bold">ما فيه طلاب بعد</p>
+  <p class="mt-1 text-slate-500">ابدأ بإضافة طلاب المدرسة وصورهم عشان الكاميرا تقدر تسجّل حضورهم.</p>
+  <button type="button" onclick="document.getElementById('add-modal').showModal()" class="mt-5 rounded-full bg-brand-600 px-5 py-2.5 text-sm font-bold text-white">
+    إضافة أول طالب
+  </button>
+</div>
+{% endif %}
+
+<dialog id="add-modal" class="w-full max-w-lg rounded-3xl p-0 backdrop:bg-ink/40">
+  <form method="post" action="/students" enctype="multipart/form-data" class="bg-white p-6">
+    <div class="mb-5 flex items-center justify-between">
+      <h2 class="text-xl font-extrabold">طالب جديد</h2>
+      <button type="button" onclick="document.getElementById('add-modal').close()" class="text-slate-400 hover:text-ink">إغلاق</button>
+    </div>
+    <div class="grid gap-4">
+      <label class="grid gap-1 text-sm font-semibold">
+        الاسم
+        <input name="name" required class="rounded-2xl border border-slate-200 px-3 py-2.5 font-normal outline-none focus:border-brand-500" placeholder="مثال: أحمد محمد" />
+      </label>
+      <label class="grid gap-1 text-sm font-semibold">
+        رقم الطالب
+        <input name="student_number" required class="rounded-2xl border border-slate-200 px-3 py-2.5 font-normal outline-none focus:border-brand-500" placeholder="مثال: 1024" />
+      </label>
+      <label class="grid gap-1 text-sm font-semibold">
+        الصف
+        <input name="class_name" required class="rounded-2xl border border-slate-200 px-3 py-2.5 font-normal outline-none focus:border-brand-500" placeholder="مثال: الثالث أ" />
+      </label>
+      <label class="grid gap-1 text-sm font-semibold">
+        صورة الوجه
+        <input name="photo" type="file" accept="image/*" required class="rounded-2xl border border-dashed border-slate-300 px-3 py-4 font-normal file:ml-3 file:rounded-full file:border-0 file:bg-brand-50 file:px-3 file:py-1 file:font-bold file:text-brand-700" />
+        <span class="font-normal text-slate-500">صورة أمامية واضحة، وجه واحد في الصورة.</span>
+      </label>
+    </div>
+    <div class="mt-6 flex justify-end gap-2">
+      <button type="button" onclick="document.getElementById('add-modal').close()" class="rounded-full px-4 py-2 text-sm font-semibold text-slate-500">إلغاء</button>
+      <button type="submit" class="rounded-full bg-brand-600 px-5 py-2 text-sm font-bold text-white hover:bg-brand-700">حفظ الطالب</button>
+    </div>
+  </form>
+</dialog>
+{% endblock %}
+{% block scripts %}
+<script>
+  {% if error %}
+  document.getElementById("add-modal").showModal();
+  {% endif %}
+</script>
+{% endblock %}

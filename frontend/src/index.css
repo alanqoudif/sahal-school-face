@@ -1,0 +1,17 @@
+@import "tailwindcss";
+@import "@heroui/styles";
+
+html,
+body,
+#root {
+  min-height: 100%;
+}
+
+body {
+  font-family: "Cairo", sans-serif;
+  background:
+    radial-gradient(900px 420px at 0% 0%, color-mix(in oklab, var(--accent) 14%, transparent), transparent 55%),
+    radial-gradient(800px 380px at 100% 0%, color-mix(in oklab, var(--success) 10%, transparent), transparent 50%),
+    var(--background);
+  color: var(--foreground);
+}
