@@ -5,9 +5,13 @@ __pycache__/
 *.db
 .DS_Store
 data/sahal.db
+data/sahal.db-wal
+data/sahal.db-shm
 data/models/
 data/photos/*
 !data/photos/.gitkeep
+data/backups/*
+!data/backups/.gitkeep
 .insightface/
 node_modules/
 frontend/dist/

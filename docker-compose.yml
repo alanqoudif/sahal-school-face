@@ -1,0 +1,23 @@
+services:
+  sahal:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/app/data
+    environment:
+      SAHAL_DATA_DIR: /app/data
+    restart: unless-stopped
+
+  backup:
+    build: .
+    depends_on:
+      - sahal
+    volumes:
+      - ./data:/app/data
+    environment:
+      SAHAL_DATA_DIR: /app/data
+      SAHAL_BACKUP_KEEP_DAYS: "30"
+      SAHAL_BACKUP_INTERVAL_SECONDS: "86400"
+    command: ["python", "-m", "app.backup", "--loop"]
+    restart: unless-stopped
