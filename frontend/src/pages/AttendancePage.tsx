@@ -5,15 +5,8 @@ import { exportUrl, fetchAttendance, markAttendance } from "../api";
 import { CueChips } from "../cues";
 import type { AttendanceResponse, FaceCues } from "../types";
 
-function today() {
-  const value = new Date();
-  const month = String(value.getMonth() + 1).padStart(2, "0");
-  const day = String(value.getDate()).padStart(2, "0");
-  return `${value.getFullYear()}-${month}-${day}`;
-}
-
 export function AttendancePage() {
-  const [day, setDay] = useState(today());
+  const [day, setDay] = useState("");
   const [classroomId, setClassroomId] = useState("");
   const [data, setData] = useState<AttendanceResponse | null>(null);
   const [error, setError] = useState("");
@@ -22,7 +15,9 @@ export function AttendancePage() {
   async function load(nextDay = day, nextClassroom = classroomId) {
     setError("");
     try {
-      setData(await fetchAttendance(nextDay, nextClassroom));
+      const payload = await fetchAttendance(nextDay, nextClassroom);
+      setData(payload);
+      if (!nextDay) setDay(payload.selected_day);
     } catch (err) {
       setError(err instanceof Error ? err.message : "تعذر تحميل الحضور");
     }

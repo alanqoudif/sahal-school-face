@@ -99,7 +99,7 @@ def _sqlite_tables() -> set[str]:
 
 
 def seed_classrooms():
-    from app.models import Classroom, Student
+    from app.models import Attendance, Classroom, Student
 
     db = SessionLocal()
     try:
@@ -116,6 +116,10 @@ def seed_classrooms():
                 db.add(classroom)
                 db.flush()
             student.classroom_id = classroom.id
+        for record in db.query(Attendance).filter(Attendance.classroom_id.is_(None)).all():
+            student = record.student
+            if student and student.classroom_id:
+                record.classroom_id = student.classroom_id
         db.commit()
     finally:
         db.close()

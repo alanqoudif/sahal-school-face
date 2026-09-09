@@ -13,7 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from starlette.middleware.sessions import SessionMiddleware
@@ -106,10 +106,7 @@ def count_students(db: Session) -> int:
 
 
 def count_present(db: Session, day: date, classroom_id: int | None = None) -> int:
-    query = select(func.count()).select_from(Attendance).where(Attendance.day == day)
-    if classroom_id:
-        query = query.where(Attendance.classroom_id == classroom_id)
-    return db.scalar(query) or 0
+    return len(present_student_ids(db, day, classroom_id))
 
 
 def save_photo(image, student_number: str) -> str:
@@ -146,15 +143,19 @@ def student_payload(student: Student) -> dict:
     }
 
 
+def present_student_ids(db: Session, day: date, classroom_id: int | None = None) -> set[int]:
+    query = select(Attendance.student_id).where(Attendance.day == day)
+    if classroom_id:
+        query = query.join(Student).where(
+            or_(Attendance.classroom_id == classroom_id, Student.classroom_id == classroom_id)
+        )
+    return set(db.scalars(query).all())
+
+
 def classroom_payload(classroom: Classroom, db: Session, day: date | None = None) -> dict:
     day = day or today()
     students = list(classroom.students)
-    present_ids = {
-        record.student_id
-        for record in db.scalars(
-            select(Attendance).where(Attendance.day == day, Attendance.classroom_id == classroom.id)
-        ).all()
-    }
+    present_ids = present_student_ids(db, day, classroom.id)
     occupied = {student.seat_code: student_payload(student) for student in students if student.seat_code}
     return {
         "id": classroom.id,
@@ -266,7 +267,7 @@ def recognize_image(frame, db: Session, classroom: Classroom) -> dict:
                     "class_name": match.class_name,
                     "section": match.section,
                     "confidence": round(score, 3),
-                    "already_marked": existing is not None,
+                    "already_marked": existing is not None or marked_now,
                     "marked_now": marked_now,
                     "photo": photo_url(match),
                     "seat_label": seat_label(match.seat_code),
@@ -317,7 +318,7 @@ def frontend_asset(asset_path: str):
 
 @app.get("/api/session")
 def api_session(request: Request):
-    return {"authenticated": is_authenticated(request)}
+    return {"authenticated": is_authenticated(request), "today": today().isoformat()}
 
 
 @app.post("/api/login")
@@ -661,7 +662,9 @@ def api_attendance(
     )
     if classroom_id:
         students_query = students_query.where(Student.classroom_id == classroom_id)
-        records_query = records_query.where(Attendance.classroom_id == classroom_id)
+        records_query = records_query.where(
+            or_(Attendance.classroom_id == classroom_id, Student.classroom_id == classroom_id)
+        )
     elif class_name:
         students_query = students_query.where(Student.class_name == class_name)
         records_query = records_query.where(Student.class_name == class_name)

@@ -15,7 +15,7 @@ export default function App() {
 
   const refresh = useCallback(async () => {
     try {
-      setAuthed(await sessionStatus());
+      setAuthed((await sessionStatus()).authenticated);
     } catch {
       setAuthed(false);
     } finally {

@@ -1,18 +1,21 @@
+import os
 from datetime import datetime
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from app.settings import TZ_NAME
-
 
 def school_tz():
-    try:
-        return ZoneInfo(TZ_NAME)
-    except ZoneInfoNotFoundError:
-        return ZoneInfo("Asia/Riyadh")
+    name = (os.environ.get("SAHAL_TZ") or os.environ.get("TZ") or "").strip()
+    if name:
+        try:
+            return ZoneInfo(name)
+        except ZoneInfoNotFoundError:
+            pass
+    return datetime.now().astimezone().tzinfo or ZoneInfo("Asia/Dubai")
 
 
 def now() -> datetime:
-    return datetime.now(school_tz()).replace(tzinfo=None)
+    stamp = datetime.now(school_tz())
+    return stamp.replace(tzinfo=None)
 
 
 def today():

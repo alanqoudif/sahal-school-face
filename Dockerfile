@@ -22,8 +22,8 @@ COPY --from=frontend /ui/dist ./frontend/dist
 
 ENV SAHAL_DATA_DIR=/app/data \
     PYTHONUNBUFFERED=1 \
-    TZ=Asia/Riyadh \
-    SAHAL_TZ=Asia/Riyadh
+    TZ=Asia/Dubai \
+    SAHAL_TZ=Asia/Dubai
 
 EXPOSE 8000
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

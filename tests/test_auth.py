@@ -1,9 +1,10 @@
 import pytest
 from fastapi.testclient import TestClient
 
+from app.clock import today
 from app.db import SessionLocal, init_db
 from app.main import app
-from app.models import Classroom, Student
+from app.models import Attendance, Classroom, Student
 
 
 @pytest.fixture
@@ -23,7 +24,9 @@ def test_login_and_manual_attendance(client: TestClient):
 
     ok = client.post("/api/login", data={"password": "test-admin"})
     assert ok.status_code == 200
-    assert client.get("/api/session").json()["authenticated"] is True
+    session = client.get("/api/session").json()
+    assert session["authenticated"] is True
+    assert session["today"]
 
     created = client.post("/api/classrooms", data={"grade": "عاشر", "section": "الأولى"})
     assert created.status_code == 200
@@ -59,6 +62,41 @@ def test_login_and_manual_attendance(client: TestClient):
 
     unmark = client.post("/api/attendance/mark", data={"student_id": student_id, "present": "0"})
     assert unmark.status_code == 200
+
+
+def test_present_with_missing_classroom_id_still_shows(client: TestClient):
+    client.post("/api/login", data={"password": "test-admin"})
+    created = client.post("/api/classrooms", data={"grade": "حادي عشر", "section": "الثانية"})
+    classroom_id = created.json()["classroom"]["id"]
+    db = SessionLocal()
+    try:
+        student = Student(
+            name="سارة",
+            student_number="9002",
+            class_name="حادي عشر",
+            section="الثانية",
+            classroom_id=classroom_id,
+            photo_path="/tmp/none.jpg",
+            embedding="[]",
+        )
+        db.add(student)
+        db.flush()
+        db.add(
+            Attendance(
+                student_id=student.id,
+                classroom_id=None,
+                day=today(),
+                source="camera",
+            )
+        )
+        db.commit()
+        student_id = student.id
+    finally:
+        db.close()
+
+    listed = client.get(f"/api/attendance?classroom_id={classroom_id}").json()
+    assert any(row["student_id"] == student_id for row in listed["records"])
+    assert all(item["id"] != student_id for item in listed["absent"])
 
 
 def test_photos_not_public_static(client: TestClient):

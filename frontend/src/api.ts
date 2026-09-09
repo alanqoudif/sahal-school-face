@@ -16,9 +16,8 @@ async function readJson<T>(response: Response): Promise<T> {
   return response.json();
 }
 
-export async function sessionStatus(): Promise<boolean> {
-  const data = await readJson<{ authenticated: boolean }>(await request("/api/session"));
-  return data.authenticated;
+export async function sessionStatus(): Promise<{ authenticated: boolean; today: string }> {
+  return readJson<{ authenticated: boolean; today: string }>(await request("/api/session"));
 }
 
 export async function login(password: string): Promise<void> {
@@ -107,9 +106,11 @@ export function classroomSnapshotUrl(id: number): string {
 }
 
 export async function fetchAttendance(day: string, classroomId: string): Promise<AttendanceResponse> {
-  const params = new URLSearchParams({ day });
+  const params = new URLSearchParams();
+  if (day) params.set("day", day);
   if (classroomId) params.set("classroom_id", classroomId);
-  return readJson<AttendanceResponse>(await request(`/api/attendance?${params}`));
+  const query = params.toString();
+  return readJson<AttendanceResponse>(await request(`/api/attendance${query ? `?${query}` : ""}`));
 }
 
 export async function markAttendance(studentId: number, present: boolean, day: string): Promise<void> {
