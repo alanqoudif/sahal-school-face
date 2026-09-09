@@ -1,6 +1,7 @@
 import { Button } from "@heroui/react";
-import type { ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { NavLink, useLocation } from "react-router-dom";
+import { logout } from "../api";
 
 const links = [
   { to: "/camera", label: "الكاميرا" },
@@ -9,8 +10,19 @@ const links = [
   { to: "/attendance", label: "الحضور" },
 ];
 
-export function AppShell({ children }: { children: ReactNode }) {
+export function AppShell({ children, onLoggedOut }: { children: ReactNode; onLoggedOut: () => void }) {
   const location = useLocation();
+  const [leaving, setLeaving] = useState(false);
+
+  async function onLogout() {
+    setLeaving(true);
+    try {
+      await logout();
+      onLoggedOut();
+    } finally {
+      setLeaving(false);
+    }
+  }
 
   return (
     <div className="mx-auto flex min-h-screen max-w-6xl flex-col px-4 py-6 sm:px-6">
@@ -24,7 +36,7 @@ export function AppShell({ children }: { children: ReactNode }) {
             <span className="block text-sm text-muted">إدارة حضور المدرسة</span>
           </span>
         </NavLink>
-        <nav className="flex flex-wrap gap-2">
+        <nav className="flex flex-wrap items-center gap-2">
           {links.map((link) => {
             const active = location.pathname === link.to || location.pathname.startsWith(`${link.to}/`);
             return (
@@ -38,9 +50,20 @@ export function AppShell({ children }: { children: ReactNode }) {
               </Button>
             );
           })}
+          <Button size="sm" variant="ghost" isPending={leaving} onPress={onLogout}>
+            خروج
+          </Button>
         </nav>
       </header>
       <main className="flex-1">{children}</main>
     </div>
   );
+}
+
+export function useUnauthorizedListener(onUnauthorized: () => void) {
+  useEffect(() => {
+    const handler = () => onUnauthorized();
+    window.addEventListener("sahal:unauthorized", handler);
+    return () => window.removeEventListener("sahal:unauthorized", handler);
+  }, [onUnauthorized]);
 }

@@ -1,12 +1,15 @@
 import { Avatar, Button, Card, Chip, Input, Label } from "@heroui/react";
 import { FormEvent, useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import { exportUrl, fetchAttendance } from "../api";
+import { exportUrl, fetchAttendance, markAttendance } from "../api";
 import { CueChips } from "../cues";
 import type { AttendanceResponse, FaceCues } from "../types";
 
 function today() {
-  return new Date().toISOString().slice(0, 10);
+  const value = new Date();
+  const month = String(value.getMonth() + 1).padStart(2, "0");
+  const day = String(value.getDate()).padStart(2, "0");
+  return `${value.getFullYear()}-${month}-${day}`;
 }
 
 export function AttendancePage() {
@@ -14,6 +17,7 @@ export function AttendancePage() {
   const [classroomId, setClassroomId] = useState("");
   const [data, setData] = useState<AttendanceResponse | null>(null);
   const [error, setError] = useState("");
+  const [busyId, setBusyId] = useState<number | null>(null);
 
   async function load(nextDay = day, nextClassroom = classroomId) {
     setError("");
@@ -33,12 +37,25 @@ export function AttendancePage() {
     load(day, classroomId);
   }
 
+  async function onMark(studentId: number, present: boolean) {
+    setBusyId(studentId);
+    setError("");
+    try {
+      await markAttendance(studentId, present, day);
+      await load(day, classroomId);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "تعذر تعديل الحضور");
+    } finally {
+      setBusyId(null);
+    }
+  }
+
   return (
     <div className="space-y-6">
       <section className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
         <div>
           <h1 className="text-3xl font-extrabold">حضور الإدارة</h1>
-          <p className="mt-1 text-muted">الحاضر والغائب لكل صف وشعبة، مع التعبير والانتباه ووضوح الصورة وقت الدخول. ملف الإكسل فيه شيت لكل شعبة.</p>
+          <p className="mt-1 text-muted">الحاضر والغائب لكل صف وشعبة. تقدر تسجّل أو تلغي يدوياً إذا الكاميرا ما اشتغلت. التعبير والانتباه تقدير فقط وما ينزلان في الإكسل.</p>
         </div>
         <Button render={(props) => <a {...props} href={exportUrl(day)} />}>تصدير إكسل</Button>
       </section>
@@ -101,11 +118,11 @@ export function AttendancePage() {
         {data?.records.length ? (
           <StudentTable
             rows={data.records.map((record) => ({
-              id: record.id,
+              id: record.student_id || record.id,
               name: record.name,
               student_number: record.student_number,
               title: record.classroom_title || `${record.class_name} — ${record.section}`,
-              extra: record.time,
+              extra: record.source === "manual" ? `${record.time} · يدوي` : record.time,
               photo: record.photo,
               chip: "حاضر",
               success: true,
@@ -114,6 +131,9 @@ export function AttendancePage() {
                 attention: record.attention,
                 quality: record.quality,
               },
+              actionLabel: "تعيين غائب",
+              onAction: () => onMark(record.student_id || 0, false),
+              busy: busyId === (record.student_id || record.id),
             }))}
           />
         ) : (
@@ -136,6 +156,9 @@ export function AttendancePage() {
               photo: student.photo,
               chip: "غائب",
               success: false,
+              actionLabel: "تسجيل حاضر",
+              onAction: () => onMark(student.id, true),
+              busy: busyId === student.id,
             }))}
           />
         ) : (
@@ -163,6 +186,9 @@ function StudentTable({
     chip: string;
     success: boolean;
     cues?: FaceCues;
+    actionLabel?: string;
+    onAction?: () => void;
+    busy?: boolean;
   }[];
 }) {
   const showCues = rows.some((row) => row.cues);
@@ -177,6 +203,7 @@ function StudentTable({
             <th className="px-4 py-3 font-semibold">التفاصيل</th>
             {showCues ? <th className="px-4 py-3 font-semibold">عند الدخول</th> : null}
             <th className="px-4 py-3 font-semibold">الحالة</th>
+            <th className="px-4 py-3 font-semibold">تعديل</th>
           </tr>
         </thead>
         <tbody>
@@ -203,6 +230,13 @@ function StudentTable({
                 <Chip size="sm" color={row.success ? "success" : "warning"} variant="soft">
                   {row.chip}
                 </Chip>
+              </td>
+              <td className="px-4 py-3">
+                {row.onAction ? (
+                  <Button size="sm" variant="secondary" isPending={row.busy} onPress={row.onAction}>
+                    {row.actionLabel}
+                  </Button>
+                ) : null}
               </td>
             </tr>
           ))}

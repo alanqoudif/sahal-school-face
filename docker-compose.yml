@@ -7,6 +7,10 @@ services:
       - ./data:/app/data
     environment:
       SAHAL_DATA_DIR: /app/data
+      TZ: Asia/Riyadh
+      SAHAL_TZ: Asia/Riyadh
+      SAHAL_ADMIN_PASSWORD: ${SAHAL_ADMIN_PASSWORD:-sahal}
+      SAHAL_SECRET_KEY: ${SAHAL_SECRET_KEY:-}
     restart: unless-stopped
 
   backup:
@@ -19,5 +23,7 @@ services:
       SAHAL_DATA_DIR: /app/data
       SAHAL_BACKUP_KEEP_DAYS: "30"
       SAHAL_BACKUP_INTERVAL_SECONDS: "86400"
+      TZ: Asia/Riyadh
+      SAHAL_TZ: Asia/Riyadh
     command: ["python", "-m", "app.backup", "--loop"]
     restart: unless-stopped

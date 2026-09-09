@@ -1,6 +1,8 @@
+import logging
+import os
 import uuid
 from contextlib import asynccontextmanager
-from datetime import date, datetime
+from datetime import date
 from pathlib import Path
 from urllib.parse import quote
 
@@ -14,33 +16,35 @@ from fastapi.templating import Jinja2Templates
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
+from starlette.middleware.sessions import SessionMiddleware
 
-from app.cameras import fetch_camera_frame
-from app.cues import analyze_cues
+from app.auth import is_authenticated, is_public_path, login_user, logout_user, password_matches, unauthorized
+from app.cameras import fetch_camera_frame, validate_camera_host, validate_camera_url
+from app.catalog import classroom_catalog, invalidate_student
+from app.clock import now, today
+from app.crypto import encrypt_secret
+from app.cues import analyze_cues, empty_cues
 from app.db import BASE_DIR, PHOTOS_DIR, get_db, init_db
 from app.excel_export import attendance_workbook
-from app.face import (
-    MATCH_THRESHOLD,
-    cosine_similarity,
-    decode_image,
-    detect_faces,
-    embedding_from_json,
-    embedding_to_json,
-    extract_embedding,
-)
+from app.face import decode_image, detect_faces, embedding_to_json, extract_embedding
+from app.matching import rank_match
 from app.models import DEFAULT_SECTION, Attendance, Classroom, Student
 from app.seats import classroom_seats, seat_label
+from app.settings import FACE_CUES_ENABLED, SESSION_HOURS, secret_key
 
 TEMPLATES_DIR = BASE_DIR / "templates"
 STATIC_DIR = BASE_DIR / "static"
 FRONTEND_DIST = BASE_DIR / "frontend" / "dist"
 ALLOWED_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp"}
+logger = logging.getLogger("sahal")
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     init_db()
     STATIC_DIR.mkdir(parents=True, exist_ok=True)
+    if not os.environ.get("SAHAL_ADMIN_PASSWORD"):
+        logger.warning("SAHAL_ADMIN_PASSWORD غير معيّن. استخدم كلمة الدخول الافتراضية من ملف البيئة.")
     yield
 
 
@@ -50,9 +54,28 @@ app.add_middleware(
     allow_origins=["http://127.0.0.1:5173", "http://localhost:5173"],
     allow_methods=["*"],
     allow_headers=["*"],
+    allow_credentials=True,
+)
+
+
+@app.middleware("http")
+async def require_login(request: Request, call_next):
+    if is_public_path(request.url.path):
+        return await call_next(request)
+    if is_authenticated(request):
+        return await call_next(request)
+    return unauthorized(request, uses_spa())
+
+
+app.add_middleware(
+    SessionMiddleware,
+    secret_key=secret_key(),
+    session_cookie="sahal_session",
+    same_site="lax",
+    https_only=False,
+    max_age=SESSION_HOURS * 3600,
 )
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
-app.mount("/photos", StaticFiles(directory=PHOTOS_DIR), name="photos")
 templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
 
 
@@ -75,11 +98,7 @@ def page_or_spa(request: Request, name: str, **context):
 
 
 def photo_url(student: Student) -> str:
-    return f"/photos/{Path(student.photo_path).name}"
-
-
-def today() -> date:
-    return date.today()
+    return f"/api/students/{student.id}/photo"
 
 
 def count_students(db: Session) -> int:
@@ -166,6 +185,7 @@ def _attendance_payload(record: Attendance) -> dict:
     classroom = record.classroom or student.classroom
     return {
         "id": record.id,
+        "student_id": student.id,
         "name": student.name,
         "class_name": student.class_name,
         "section": student.section or DEFAULT_SECTION,
@@ -178,24 +198,24 @@ def _attendance_payload(record: Attendance) -> dict:
         "expression": record.expression or "",
         "attention": record.attention or "",
         "quality": record.quality or "",
+        "source": record.source or "camera",
     }
 
 
-def recognize_image(frame, db: Session, classroom: Classroom | None = None) -> dict:
-    query = select(Student)
-    if classroom:
-        query = query.where(Student.classroom_id == classroom.id)
-    students = db.scalars(query).all()
-    catalog = [(student, embedding_from_json(student.embedding)) for student in students if student.embedding]
+def recognize_image(frame, db: Session, classroom: Classroom) -> dict:
+    catalog = classroom_catalog(db, classroom.id)
     day = today()
-    now = datetime.now()
+    stamped = now()
     marked_ids: set[int] = set()
     faces_payload = []
+    total_students = (
+        db.scalar(select(func.count()).select_from(Student).where(Student.classroom_id == classroom.id)) or 0
+    )
 
     for face in detect_faces(frame):
         embedding = np.asarray(face.normed_embedding, dtype=np.float32)
-        match, score = _best_match(embedding, catalog)
-        cues = analyze_cues(frame, face)
+        match, score, status = rank_match(embedding, catalog)
+        cues = analyze_cues(frame, face) if FACE_CUES_ENABLED else empty_cues()
         item = {
             "bbox": [int(v) for v in face.bbox.tolist()],
             "known": False,
@@ -211,7 +231,9 @@ def recognize_image(frame, db: Session, classroom: Classroom | None = None) -> d
             "seat_label": None,
             **cues,
         }
-        if match and score >= MATCH_THRESHOLD:
+        if status == "ambiguous":
+            item["name"] = "غير مؤكد"
+        if match and status == "matched":
             existing = db.scalar(
                 select(Attendance).where(Attendance.student_id == match.id, Attendance.day == day)
             )
@@ -220,12 +242,13 @@ def recognize_image(frame, db: Session, classroom: Classroom | None = None) -> d
                 db.add(
                     Attendance(
                         student_id=match.id,
-                        classroom_id=classroom.id if classroom else match.classroom_id,
+                        classroom_id=classroom.id,
                         day=day,
-                        checked_in_at=now,
+                        checked_in_at=stamped,
                         expression=cues["expression"],
                         attention=cues["attention"],
                         quality=cues["quality"],
+                        source="camera",
                     )
                 )
                 marked_now = True
@@ -256,27 +279,18 @@ def recognize_image(frame, db: Session, classroom: Classroom | None = None) -> d
     except IntegrityError:
         db.rollback()
 
-    recent_query = select(Attendance).where(Attendance.day == day).order_by(Attendance.checked_in_at.desc())
-    if classroom:
-        recent_query = recent_query.where(Attendance.classroom_id == classroom.id)
+    recent_query = (
+        select(Attendance)
+        .where(Attendance.day == day, Attendance.classroom_id == classroom.id)
+        .order_by(Attendance.checked_in_at.desc())
+    )
     return {
         "faces": faces_payload,
-        "present_today": count_present(db, day, classroom.id if classroom else None),
-        "total_students": len(students) if classroom else count_students(db),
+        "present_today": count_present(db, day, classroom.id),
+        "total_students": total_students,
         "recent": [_attendance_payload(record) for record in db.scalars(recent_query).all()[:8]],
-        "classroom_id": classroom.id if classroom else None,
+        "classroom_id": classroom.id,
     }
-
-
-def _best_match(embedding, catalog):
-    best_student = None
-    best_score = -1.0
-    for student, stored in catalog:
-        score = cosine_similarity(embedding, stored)
-        if score > best_score:
-            best_score = score
-            best_student = student
-    return best_student, best_score
 
 
 def _parse_day(value: str | None) -> date:
@@ -301,6 +315,25 @@ def frontend_asset(asset_path: str):
     return JSONResponse({"detail": "Not Found"}, status_code=404)
 
 
+@app.get("/api/session")
+def api_session(request: Request):
+    return {"authenticated": is_authenticated(request)}
+
+
+@app.post("/api/login")
+async def api_login(request: Request, password: str = Form(...)):
+    if not password_matches(password):
+        return JSONResponse({"ok": False, "error": "كلمة المرور غير صحيحة"}, status_code=401)
+    login_user(request)
+    return {"ok": True}
+
+
+@app.post("/api/logout")
+async def api_logout(request: Request):
+    logout_user(request)
+    return {"ok": True}
+
+
 @app.get("/", include_in_schema=False)
 def home():
     if uses_spa():
@@ -313,6 +346,7 @@ def home():
 @app.get("/attendance", response_class=HTMLResponse)
 @app.get("/classes", response_class=HTMLResponse)
 @app.get("/classes/{classroom_id}", response_class=HTMLResponse)
+@app.get("/login", response_class=HTMLResponse)
 def spa_routes(request: Request, classroom_id: int | None = None):
     return page_or_spa(request, "students.html", active="students")
 
@@ -368,11 +402,18 @@ def api_update_classroom(
     classroom = db.get(Classroom, classroom_id)
     if not classroom:
         return JSONResponse({"ok": False, "error": "الصف غير موجود"}, status_code=404)
+    try:
+        if camera_ip.strip():
+            camera_ip = validate_camera_host(camera_ip.strip())
+        if camera_url.strip():
+            camera_url = validate_camera_url(camera_url.strip())
+    except ValueError as exc:
+        return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
     classroom.camera_ip = camera_ip.strip() or None
     classroom.camera_url = camera_url.strip() or None
     classroom.camera_user = camera_user.strip() or None
     if camera_password.strip():
-        classroom.camera_password = camera_password.strip()
+        classroom.camera_password = encrypt_secret(camera_password.strip())
     classroom.camera_kind = camera_kind if camera_kind in {"snapshot", "rtsp"} else "snapshot"
     db.commit()
     db.refresh(classroom)
@@ -400,7 +441,11 @@ def api_assign_seat(
     if taken:
         return JSONResponse({"ok": False, "error": f"المقعد محجوز لـ {taken.name}"}, status_code=400)
     student.seat_code = seat_code
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        return JSONResponse({"ok": False, "error": "المقعد محجوز"}, status_code=400)
     return {"ok": True, "classroom": classroom_payload(classroom, db), "student": student_payload(student)}
 
 
@@ -460,6 +505,17 @@ def api_students(db: Session = Depends(get_db)):
     return {"students": [student_payload(student) for student in students]}
 
 
+@app.get("/api/students/{student_id}/photo")
+def api_student_photo(student_id: int, db: Session = Depends(get_db)):
+    student = db.get(Student, student_id)
+    if not student:
+        return JSONResponse({"error": "الطالب غير موجود"}, status_code=404)
+    path = Path(student.photo_path)
+    if not path.exists() or not path.is_file():
+        return JSONResponse({"error": "الصورة غير موجودة"}, status_code=404)
+    return FileResponse(path)
+
+
 @app.post("/api/students")
 async def api_create_student(
     name: str = Form(...),
@@ -517,6 +573,7 @@ async def api_create_student(
         db.rollback()
         Path(photo_path).unlink(missing_ok=True)
         return JSONResponse({"ok": False, "error": "رقم الطالب مستخدم من قبل"}, status_code=400)
+    invalidate_student(student.id)
     return {"ok": True, "student": student_payload(student)}
 
 
@@ -554,6 +611,7 @@ async def api_update_student(
         Path(student.photo_path).unlink(missing_ok=True)
         student.photo_path = save_photo(image, student_number)
         student.embedding = embedding_to_json(embedding)
+        invalidate_student(student.id)
 
     classroom = get_or_create_classroom(db, class_name, section)
     if student.classroom_id != classroom.id:
@@ -579,6 +637,7 @@ def api_delete_student(student_id: int, db: Session = Depends(get_db)):
     student = db.get(Student, student_id)
     if student:
         Path(student.photo_path).unlink(missing_ok=True)
+        invalidate_student(student.id)
         db.delete(student)
         db.commit()
     return {"ok": True}
@@ -623,6 +682,42 @@ def api_attendance(
     }
 
 
+@app.post("/api/attendance/mark")
+def api_mark_attendance(
+    student_id: int = Form(...),
+    present: str = Form("1"),
+    day: str | None = Form(None),
+    db: Session = Depends(get_db),
+):
+    student = db.get(Student, student_id)
+    if not student:
+        return JSONResponse({"ok": False, "error": "الطالب غير موجود"}, status_code=404)
+    selected_day = _parse_day(day)
+    existing = db.scalar(select(Attendance).where(Attendance.student_id == student.id, Attendance.day == selected_day))
+    want_present = present.strip() not in {"0", "false", "no", "غائب"}
+    if want_present and existing is None:
+        db.add(
+            Attendance(
+                student_id=student.id,
+                classroom_id=student.classroom_id,
+                day=selected_day,
+                checked_in_at=now(),
+                expression="",
+                attention="",
+                quality="",
+                source="manual",
+            )
+        )
+        try:
+            db.commit()
+        except IntegrityError:
+            db.rollback()
+    elif not want_present and existing is not None:
+        db.delete(existing)
+        db.commit()
+    return {"ok": True}
+
+
 @app.get("/attendance/export")
 def export_attendance(day: str | None = None, db: Session = Depends(get_db)):
     selected_day = _parse_day(day)
@@ -657,14 +752,23 @@ async def recognize(
     classroom_id: int | None = Form(None),
     db: Session = Depends(get_db),
 ):
+    if not classroom_id:
+        return JSONResponse({"ok": False, "error": "اختر الصف والشعبة قبل التسجيل"}, status_code=400)
+    classroom = db.get(Classroom, classroom_id)
+    if not classroom:
+        return JSONResponse({"ok": False, "error": "الصف غير موجود"}, status_code=404)
     data = await image.read()
     if not data:
-        return {"faces": [], "present_today": count_present(db, today()), "total_students": count_students(db)}
+        return {
+            "faces": [],
+            "present_today": count_present(db, today(), classroom.id),
+            "total_students": db.scalar(select(func.count()).select_from(Student).where(Student.classroom_id == classroom.id))
+            or 0,
+        }
     try:
         frame = decode_image(data)
     except ValueError:
         return {"faces": [], "error": "تعذر قراءة الإطار"}
-    classroom = db.get(Classroom, classroom_id) if classroom_id else None
     return recognize_image(frame, db, classroom)
 
 

@@ -42,9 +42,8 @@ def attendance_workbook(day, classrooms, present_by_student: dict) -> BytesIO:
                     "المقعد",
                     "الحالة",
                     "وقت الدخول",
-                    "التعبير",
-                    "الانتباه",
                     "وضوح الصورة",
+                    "مصدر التسجيل",
                 ]
             )
             for cell in sheet[1]:
@@ -65,9 +64,8 @@ def attendance_workbook(day, classrooms, present_by_student: dict) -> BytesIO:
                         seat_label(student.seat_code),
                         status,
                         time_text,
-                        getattr(record, "expression", "") if record else "",
-                        getattr(record, "attention", "") if record else "",
                         getattr(record, "quality", "") if record else "",
+                        "يدوي" if record and getattr(record, "source", "") == "manual" else ("كاميرا" if record else ""),
                     ]
                 )
                 fill = present_fill if record else absent_fill

@@ -12,6 +12,7 @@ export function CameraPage() {
   const captureRef = useRef<HTMLCanvasElement | null>(null);
   const busyRef = useRef(false);
   const classroomIdRef = useRef<number | undefined>(undefined);
+  const pauseUntilRef = useRef(0);
   const [status, setStatus] = useState("جاري تشغيل كاميرا اللابتوب...");
   const [scan, setScan] = useState("بعد ما تظهر الصورة، التعرف يشتغل تلقائياً.");
   const [needsRetry, setNeedsRetry] = useState(false);
@@ -83,6 +84,12 @@ export function CameraPage() {
     startCamera();
     const timer = window.setInterval(async () => {
       const video = videoRef.current;
+      const selectedClassroom = classroomIdRef.current;
+      if (!selectedClassroom) {
+        setScan("اختر الصف والشعبة عشان نبدأ التسجيل.");
+        return;
+      }
+      if (Date.now() < pauseUntilRef.current) return;
       if (busyRef.current || !video || video.readyState < 2) return;
       busyRef.current = true;
       if (!captureRef.current) captureRef.current = document.createElement("canvas");
@@ -90,27 +97,30 @@ export function CameraPage() {
       canvas.width = video.videoWidth;
       canvas.height = video.videoHeight;
       canvas.getContext("2d")?.drawImage(video, 0, 0);
-      const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/jpeg", 0.8));
+      const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/jpeg", 0.72));
       if (!blob) {
         busyRef.current = false;
         return;
       }
       try {
-        const data = await recognizeFrame(blob, classroomIdRef.current);
+        const data = await recognizeFrame(blob, selectedClassroom);
         drawFaces(data.faces || []);
         setPresent(data.present_today);
         setTotal(data.total_students);
         setRecent(data.recent || []);
         const known = (data.faces || []).find((face) => face.known);
         if (known) setLastMatch(known);
+        if ((data.faces || []).some((face) => face.marked_now)) {
+          pauseUntilRef.current = Date.now() + 8000;
+        }
         const count = (data.faces || []).length;
         setScan(count ? `لقينا ${count} وجه في الإطار` : "ما فيه وجه واضح الآن");
-      } catch {
-        setScan("صار خطأ أثناء التعرف. نعيد المحاولة...");
+      } catch (err) {
+        setScan(err instanceof Error ? err.message : "صار خطأ أثناء التعرف. نعيد المحاولة...");
       } finally {
         busyRef.current = false;
       }
-    }, 1000);
+    }, 2000);
     return () => {
       window.clearInterval(timer);
       const stream = videoRef.current?.srcObject as MediaStream | undefined;
@@ -122,7 +132,7 @@ export function CameraPage() {
     <div className="space-y-6">
       <section>
         <h1 className="text-3xl font-extrabold">كاميرا اللابتوب</h1>
-        <p className="mt-1 text-muted">التسجيل من كاميرا الجهاز، مع قراءة التعبير والانتباه ووضوح الصورة. اختر الصف والشعبة إذا تبي الحضور ينحسب عليها.</p>
+        <p className="mt-1 text-muted">اختر الصف والشعبة أولاً. التعرف يشتغل على طلاب هذا الصف فقط، ويتوقف ثواني بعد كل تسجيل ناجح.</p>
       </section>
 
       <div className="grid max-w-md gap-1">
@@ -138,7 +148,7 @@ export function CameraPage() {
           }}
           className="input h-10 w-full rounded-xl"
         >
-          <option value="">كل الطلاب</option>
+          <option value="">اختر الصف والشعبة</option>
           {classrooms.map((item) => (
             <option key={item.id} value={item.id}>
               {item.title}

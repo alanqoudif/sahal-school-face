@@ -26,10 +26,10 @@ export function cueLine(cues: FaceCues | null | undefined): string {
 
 export function CueChips({ cues, size = "sm" }: { cues: FaceCues | null | undefined; size?: "sm" | "md" }) {
   const items = [
-    { kind: "expression" as const, value: cues?.expression },
-    { kind: "attention" as const, value: cues?.attention },
-    { kind: "quality" as const, value: cues?.quality },
-  ].filter((item) => item.value);
+    { kind: "quality" as const, value: cues?.quality, label: cues?.quality },
+    { kind: "expression" as const, value: cues?.expression, label: cues?.expression ? `تقدير: ${cues.expression}` : "" },
+    { kind: "attention" as const, value: cues?.attention, label: cues?.attention ? `تقدير: ${cues.attention}` : "" },
+  ].filter((item) => item.label);
 
   if (!items.length) return null;
 
@@ -37,7 +37,7 @@ export function CueChips({ cues, size = "sm" }: { cues: FaceCues | null | undefi
     <div className="flex flex-wrap gap-1.5">
       {items.map((item) => (
         <Chip key={item.kind} size={size} color={cueTone(item.kind, item.value || "")} variant="soft">
-          {item.value}
+          {item.label}
         </Chip>
       ))}
     </div>

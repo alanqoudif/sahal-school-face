@@ -79,7 +79,7 @@ export function StudentsPage() {
       <section className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
         <div>
           <h1 className="text-3xl font-extrabold">الطلاب</h1>
-          <p className="mt-1 text-muted">أضف الطالب للصف والشعبة، وعدّل بياناته وقت ما تبي.</p>
+          <p className="mt-1 text-muted">أضف الطالب للصف والشعبة بصورة أمامية واضحة. الصور الضعيفة ما تنقبل.</p>
         </div>
         <Button onPress={openCreate}>إضافة طالب</Button>
       </section>
@@ -190,7 +190,7 @@ export function StudentsPage() {
                       required={!editing}
                       className="w-full rounded-2xl border border-dashed border-border px-3 py-4 text-sm"
                     />
-                    <Description>صورة أمامية واضحة، ويفضّل وجه واحد.</Description>
+                    <Description>صورة أمامية واضحة بإضاءة جيدة. النظام يرفض الصورة إذا الوجه صغير أو مشوّش.</Description>
                   </div>
                 </Modal.Body>
                 <Modal.Footer>

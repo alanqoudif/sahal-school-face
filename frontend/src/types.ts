@@ -55,6 +55,8 @@ export type AttendanceRow = {
   date?: string;
   seat_label?: string;
   classroom_title?: string;
+  student_id?: number;
+  source?: string;
 } & FaceCues;
 
 export type FaceMatch = {

@@ -67,6 +67,7 @@ class Attendance(Base):
     expression: Mapped[str] = mapped_column(String(50), default="")
     attention: Mapped[str] = mapped_column(String(50), default="")
     quality: Mapped[str] = mapped_column(String(50), default="")
+    source: Mapped[str] = mapped_column(String(20), default="camera")
 
     student: Mapped[Student] = relationship(back_populates="attendances")
     classroom: Mapped[Classroom | None] = relationship(back_populates="attendances")

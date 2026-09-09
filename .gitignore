@@ -12,6 +12,7 @@ data/photos/*
 !data/photos/.gitkeep
 data/backups/*
 !data/backups/.gitkeep
+data/.secret
 .insightface/
 node_modules/
 frontend/dist/

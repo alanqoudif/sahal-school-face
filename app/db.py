@@ -71,6 +71,25 @@ def migrate_schema():
         _add_column("attendances", "attention VARCHAR(50) DEFAULT ''")
     if "attendances" in _sqlite_tables() and "quality" not in _table_columns("attendances"):
         _add_column("attendances", "quality VARCHAR(50) DEFAULT ''")
+    if "attendances" in _sqlite_tables() and "source" not in _table_columns("attendances"):
+        _add_column("attendances", "source VARCHAR(20) DEFAULT 'camera'")
+    _ensure_seat_unique_index()
+
+
+def _ensure_seat_unique_index():
+    if "students" not in _sqlite_tables():
+        return
+    try:
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS uq_students_classroom_seat "
+                    "ON students(classroom_id, seat_code) "
+                    "WHERE seat_code IS NOT NULL AND seat_code != ''"
+                )
+            )
+    except Exception:
+        pass
 
 
 def _sqlite_tables() -> set[str]:

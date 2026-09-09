@@ -2,8 +2,6 @@ import json
 import cv2
 import numpy as np
 
-MATCH_THRESHOLD = 0.45
-
 _analyzer = None
 
 
@@ -35,11 +33,17 @@ def _largest_face(faces):
     return max(faces, key=lambda face: (face.bbox[2] - face.bbox[0]) * (face.bbox[3] - face.bbox[1]))
 
 
-def extract_embedding(image: np.ndarray) -> np.ndarray:
+def extract_embedding(image: np.ndarray, require_quality: bool = True) -> np.ndarray:
     faces = get_analyzer().get(image)
     face = _largest_face(faces)
     if face is None:
         raise ValueError("ما لقينا وجه واضح في الصورة. استخدم صورة أمامية للطالب.")
+    if require_quality:
+        from app.cues import analyze_cues
+
+        quality = analyze_cues(image, face).get("quality")
+        if quality == "ضعيفة":
+            raise ValueError("الصورة غير واضحة كفاية. قرّب الوجه وحسّن الإضاءة ثم أعد الرفع.")
     return np.asarray(face.normed_embedding, dtype=np.float32)
 
 
@@ -55,5 +59,3 @@ def embedding_from_json(raw: str) -> np.ndarray:
     return np.asarray(json.loads(raw), dtype=np.float32)
 
 
-def cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
-    return float(np.dot(a, b))
