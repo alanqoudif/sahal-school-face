@@ -67,10 +67,6 @@ export function IpCameraPanel({ classroomId, onResult, onNotice }: Props) {
   const run = useCallback(
     async (manual: boolean) => {
       const selected = classroomRef.current;
-      if (!selected) {
-        onNotice("اختر الصف والشعبة عشان نبدأ التسجيل.");
-        return;
-      }
       if (busyRef.current) return;
       busyRef.current = true;
       setBusy(true);
@@ -141,13 +137,13 @@ export function IpCameraPanel({ classroomId, onResult, onNotice }: Props) {
               رجوع للبث
             </Button>
           ) : null}
-          <Button size="sm" isDisabled={!online || busy || !classroomId} onPress={() => run(true)}>
+          <Button size="sm" isDisabled={!online || busy} onPress={() => run(true)}>
             التقاط والتعرف من كاميرا EZVIZ
           </Button>
           <Button
             size="sm"
             variant={auto ? "danger" : "secondary"}
-            isDisabled={!online || !classroomId}
+            isDisabled={!online}
             onPress={() => {
               setCaptured(null);
               setAuto((value) => !value);

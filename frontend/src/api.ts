@@ -129,8 +129,9 @@ export async function ezvizStatus(): Promise<CameraStatus> {
   return readJson<CameraStatus>(await request("/api/cameras/ezviz/status"));
 }
 
-export async function ezvizRecognize(classroomId: number, includeFrame: boolean): Promise<IpRecognizeResponse> {
-  const params = new URLSearchParams({ classroom_id: String(classroomId) });
+export async function ezvizRecognize(classroomId: number | undefined, includeFrame: boolean): Promise<IpRecognizeResponse> {
+  const params = new URLSearchParams();
+  if (classroomId) params.set("classroom_id", String(classroomId));
   if (includeFrame) params.set("include_frame", "1");
   return readJson<IpRecognizeResponse>(await request(`/api/cameras/ezviz/recognize?${params}`, { method: "POST" }));
 }

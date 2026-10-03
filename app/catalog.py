@@ -15,8 +15,12 @@ def invalidate_student(student_id: int | None) -> None:
         _embeddings.pop(student_id, None)
 
 
-def classroom_catalog(db: Session, classroom_id: int) -> list[tuple[Student, np.ndarray]]:
-    students = db.scalars(select(Student).where(Student.classroom_id == classroom_id)).all()
+def classroom_catalog(db: Session, classroom_id: int | None = None) -> list[tuple[Student, np.ndarray]]:
+    """Students of one classroom, or every student when classroom_id is None."""
+    query = select(Student)
+    if classroom_id is not None:
+        query = query.where(Student.classroom_id == classroom_id)
+    students = db.scalars(query).all()
     catalog: list[tuple[Student, np.ndarray]] = []
     for student in students:
         stored = _embeddings.get(student.id)

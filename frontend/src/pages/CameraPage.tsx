@@ -180,7 +180,7 @@ export function CameraPage() {
         ))}
       </div>
 
-      <div className="grid max-w-md gap-1">
+      <div className={source === "ezviz" ? "hidden" : "grid max-w-md gap-1"}>
         <Label htmlFor="classroom">الصف والشعبة</Label>
         <select
           id="classroom"

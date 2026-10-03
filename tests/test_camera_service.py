@@ -160,6 +160,8 @@ def test_camera_endpoints(monkeypatch, video_file):
         assert body["recognized"] is False and body["faces"] == []
         assert body["camera"] == "ezviz_ty1" and body["frame_width"] == 640 and body["frame_jpeg"]
         assert client.post("/api/cameras/ezviz/recognize?classroom_id=99999").status_code == 404
+        everyone = client.post("/api/cameras/ezviz/recognize")
+        assert everyone.status_code == 200 and everyone.json()["classroom_id"] is None
     finally:
         service.disconnect()
         cs._services.clear()

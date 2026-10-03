@@ -210,15 +210,18 @@ def _attendance_payload(record: Attendance) -> dict:
     }
 
 
-def recognize_image(frame, db: Session, classroom: Classroom) -> dict:
-    catalog = classroom_catalog(db, classroom.id)
+def recognize_image(frame, db: Session, classroom: Classroom | None) -> dict:
+    """classroom=None matches against every student in the school."""
+    classroom_id = classroom.id if classroom else None
+    catalog = classroom_catalog(db, classroom_id)
     day = today()
     stamped = now()
     marked_ids: set[int] = set()
     faces_payload = []
-    total_students = (
-        db.scalar(select(func.count()).select_from(Student).where(Student.classroom_id == classroom.id)) or 0
-    )
+    total_query = select(func.count()).select_from(Student)
+    if classroom_id is not None:
+        total_query = total_query.where(Student.classroom_id == classroom_id)
+    total_students = db.scalar(total_query) or 0
 
     for face in detect_faces(frame):
         embedding = np.asarray(face.normed_embedding, dtype=np.float32)
@@ -250,7 +253,7 @@ def recognize_image(frame, db: Session, classroom: Classroom) -> dict:
                 db.add(
                     Attendance(
                         student_id=match.id,
-                        classroom_id=classroom.id,
+                        classroom_id=classroom_id or match.classroom_id,
                         day=day,
                         checked_in_at=stamped,
                         expression=cues["expression"],
@@ -287,17 +290,15 @@ def recognize_image(frame, db: Session, classroom: Classroom) -> dict:
     except IntegrityError:
         db.rollback()
 
-    recent_query = (
-        select(Attendance)
-        .where(Attendance.day == day, Attendance.classroom_id == classroom.id)
-        .order_by(Attendance.checked_in_at.desc())
-    )
+    recent_query = select(Attendance).where(Attendance.day == day).order_by(Attendance.checked_in_at.desc())
+    if classroom_id is not None:
+        recent_query = recent_query.where(Attendance.classroom_id == classroom_id)
     return {
         "faces": faces_payload,
-        "present_today": count_present(db, day, classroom.id),
+        "present_today": count_present(db, day, classroom_id),
         "total_students": total_students,
         "recent": [_attendance_payload(record) for record in db.scalars(recent_query).all()[:8]],
-        "classroom_id": classroom.id,
+        "classroom_id": classroom_id,
     }
 
 
@@ -576,13 +577,13 @@ async def api_ezviz_stream(request: Request, fps: int = 8):
 
 
 @app.post("/api/cameras/ezviz/recognize")
-def api_ezviz_recognize(classroom_id: int, include_frame: bool = False, db: Session = Depends(get_db)):
+def api_ezviz_recognize(classroom_id: int | None = None, include_frame: bool = False, db: Session = Depends(get_db)):
     """Feed the latest EZVIZ frame into the same recognize_image() used by upload/webcam."""
     service, error = _ezviz_or_error()
     if error:
         return error
-    classroom = db.get(Classroom, classroom_id)
-    if not classroom:
+    classroom = db.get(Classroom, classroom_id) if classroom_id else None
+    if classroom_id and not classroom:
         return JSONResponse({"error": "الصف غير موجود"}, status_code=404)
     latest = service.get_latest_frame()
     if latest is None:
