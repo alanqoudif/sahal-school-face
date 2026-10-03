@@ -1,4 +1,4 @@
-import type { AttendanceResponse, Classroom, RecognizeResponse, Student } from "./types";
+import type { AttendanceResponse, CameraStatus, Classroom, IpRecognizeResponse, RecognizeResponse, Student } from "./types";
 
 async function request(path: string, init?: RequestInit): Promise<Response> {
   const response = await fetch(path, { credentials: "include", ...init });
@@ -123,4 +123,14 @@ export async function markAttendance(studentId: number, present: boolean, day: s
 
 export function exportUrl(day: string): string {
   return `/attendance/export?day=${day}`;
+}
+
+export async function ezvizStatus(): Promise<CameraStatus> {
+  return readJson<CameraStatus>(await request("/api/cameras/ezviz/status"));
+}
+
+export async function ezvizRecognize(classroomId: number, includeFrame: boolean): Promise<IpRecognizeResponse> {
+  const params = new URLSearchParams({ classroom_id: String(classroomId) });
+  if (includeFrame) params.set("include_frame", "1");
+  return readJson<IpRecognizeResponse>(await request(`/api/cameras/ezviz/recognize?${params}`, { method: "POST" }));
 }

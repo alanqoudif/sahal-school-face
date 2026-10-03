@@ -7,6 +7,7 @@ from app.db import DATA_DIR
 TZ_NAME = os.environ.get("SAHAL_TZ") or os.environ.get("TZ") or ""
 ADMIN_PASSWORD = os.environ.get("SAHAL_ADMIN_PASSWORD", "sahal")
 SESSION_HOURS = int(os.environ.get("SAHAL_SESSION_HOURS", "12"))
+FACE_RECOGNITION_INTERVAL_MS = max(250, int(os.environ.get("FACE_RECOGNITION_INTERVAL_MS", "1000") or 1000))
 FACE_CUES_ENABLED = os.environ.get("SAHAL_FACE_CUES", "1").strip() not in {"0", "false", "no"}
 
 

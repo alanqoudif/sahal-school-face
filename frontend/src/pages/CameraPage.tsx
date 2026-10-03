@@ -1,9 +1,17 @@
 import { Avatar, Button, Card, Chip, Label } from "@heroui/react";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { listClassrooms, recognizeFrame } from "../api";
+import { IpCameraPanel } from "./IpCameraPanel";
 import { CueChips, cueLine } from "../cues";
-import type { AttendanceRow, Classroom, FaceMatch } from "../types";
+import type { AttendanceRow, Classroom, FaceMatch, RecognizeResponse } from "../types";
+
+type Source = "laptop" | "upload" | "ezviz";
+const SOURCES: { id: Source; label: string }[] = [
+  { id: "laptop", label: "كاميرا اللابتوب" },
+  { id: "upload", label: "رفع صورة" },
+  { id: "ezviz", label: "كاميرا EZVIZ" },
+];
 
 export function CameraPage() {
   const [searchParams, setSearchParams] = useSearchParams();
@@ -20,9 +28,33 @@ export function CameraPage() {
   const [total, setTotal] = useState(0);
   const [recent, setRecent] = useState<AttendanceRow[]>([]);
   const [lastMatch, setLastMatch] = useState<FaceMatch | null>(null);
+  const [source, setSource] = useState<Source>("laptop");
   const [classrooms, setClassrooms] = useState<Classroom[]>([]);
   const [classroomId, setClassroomId] = useState(searchParams.get("classroom") || "");
   classroomIdRef.current = classroomId ? Number(classroomId) : undefined;
+
+  const applyResult = useCallback((data: RecognizeResponse) => {
+    setPresent(data.present_today);
+    setTotal(data.total_students);
+    setRecent(data.recent || []);
+    const known = (data.faces || []).find((face) => face.known);
+    if (known) setLastMatch(known);
+  }, []);
+
+  async function recognizeUpload(file: File) {
+    if (!classroomIdRef.current) {
+      setScan("اختر الصف والشعبة عشان نبدأ التسجيل.");
+      return;
+    }
+    try {
+      const data = await recognizeFrame(file, classroomIdRef.current);
+      applyResult(data);
+      const count = (data.faces || []).length;
+      setScan(count ? `لقينا ${count} وجه في الصورة` : "ما فيه وجه واضح في الصورة");
+    } catch (err) {
+      setScan(err instanceof Error ? err.message : "صار خطأ أثناء التعرف.");
+    }
+  }
 
   function drawFaces(faces: FaceMatch[]) {
     const video = videoRef.current;
@@ -81,6 +113,10 @@ export function CameraPage() {
 
   useEffect(() => {
     listClassrooms().then(setClassrooms).catch(() => undefined);
+  }, []);
+
+  useEffect(() => {
+    if (source !== "laptop") return;
     startCamera();
     const timer = window.setInterval(async () => {
       const video = videoRef.current;
@@ -105,11 +141,7 @@ export function CameraPage() {
       try {
         const data = await recognizeFrame(blob, selectedClassroom);
         drawFaces(data.faces || []);
-        setPresent(data.present_today);
-        setTotal(data.total_students);
-        setRecent(data.recent || []);
-        const known = (data.faces || []).find((face) => face.known);
-        if (known) setLastMatch(known);
+        applyResult(data);
         if ((data.faces || []).some((face) => face.marked_now)) {
           pauseUntilRef.current = Date.now() + 8000;
         }
@@ -126,14 +158,27 @@ export function CameraPage() {
       const stream = videoRef.current?.srcObject as MediaStream | undefined;
       stream?.getTracks().forEach((track) => track.stop());
     };
-  }, []);
+  }, [source]);
 
   return (
     <div className="space-y-6">
       <section>
-        <h1 className="text-3xl font-extrabold">كاميرا اللابتوب</h1>
+        <h1 className="text-3xl font-extrabold">التسجيل بالكاميرا</h1>
         <p className="mt-1 text-muted">اختر الصف والشعبة أولاً. التعرف يشتغل على طلاب هذا الصف فقط، ويتوقف ثواني بعد كل تسجيل ناجح.</p>
       </section>
+
+      <div className="flex flex-wrap gap-2" role="tablist" aria-label="مصدر الصورة">
+        {SOURCES.map((item) => (
+          <Button
+            key={item.id}
+            size="sm"
+            variant={source === item.id ? "primary" : "secondary"}
+            onPress={() => setSource(item.id)}
+          >
+            {item.label}
+          </Button>
+        ))}
+      </div>
 
       <div className="grid max-w-md gap-1">
         <Label htmlFor="classroom">الصف والشعبة</Label>
@@ -158,6 +203,28 @@ export function CameraPage() {
       </div>
 
       <div className="grid gap-4 lg:grid-cols-[minmax(0,1.45fr)_minmax(280px,0.8fr)]">
+        {source === "ezviz" ? (
+          <div className="space-y-2">
+            <IpCameraPanel classroomId={classroomId ? Number(classroomId) : undefined} onResult={applyResult} onNotice={setScan} />
+            <p className="text-sm text-muted">{scan}</p>
+          </div>
+        ) : source === "upload" ? (
+          <Card className="p-6">
+            <Label htmlFor="upload-image">ارفع صورة فيها وجوه الطلاب</Label>
+            <input
+              id="upload-image"
+              type="file"
+              accept="image/jpeg,image/png,image/webp"
+              className="input mt-2 w-full rounded-xl p-2"
+              onChange={(event) => {
+                const file = event.target.files?.[0];
+                if (file) recognizeUpload(file);
+                event.target.value = "";
+              }}
+            />
+            <p className="mt-3 text-sm text-muted">{scan}</p>
+          </Card>
+        ) : (
         <Card className="overflow-hidden p-3">
           <div className="relative overflow-hidden rounded-2xl bg-black">
             <video ref={videoRef} autoPlay playsInline muted className="block aspect-video w-full object-cover" />
@@ -181,6 +248,7 @@ export function CameraPage() {
             )}
           </Card.Footer>
         </Card>
+        )}
 
         <aside className="space-y-4">
           <Card>

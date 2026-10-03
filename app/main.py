@@ -1,5 +1,8 @@
+import asyncio
+import base64
 import logging
 import os
+import threading
 import uuid
 from contextlib import asynccontextmanager
 from datetime import date
@@ -9,8 +12,9 @@ from urllib.parse import quote
 import cv2
 import numpy as np
 from fastapi import Depends, FastAPI, File, Form, Request, UploadFile
+from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
+from fastapi.responses import FileResponse, Response, HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import func, or_, select
@@ -19,6 +23,7 @@ from sqlalchemy.orm import Session
 from starlette.middleware.sessions import SessionMiddleware
 
 from app.auth import is_authenticated, is_public_path, login_user, logout_user, password_matches, unauthorized
+from app.camera_service import get_camera_service, init_camera_services, shutdown_camera_services
 from app.cameras import fetch_camera_frame, validate_camera_host, validate_camera_url
 from app.catalog import classroom_catalog, invalidate_student
 from app.clock import now, today
@@ -30,7 +35,7 @@ from app.face import decode_image, detect_faces, embedding_to_json, extract_embe
 from app.matching import rank_match
 from app.models import DEFAULT_SECTION, Attendance, Classroom, Student
 from app.seats import classroom_seats, seat_label
-from app.settings import FACE_CUES_ENABLED, SESSION_HOURS, secret_key
+from app.settings import FACE_CUES_ENABLED, FACE_RECOGNITION_INTERVAL_MS, SESSION_HOURS, secret_key
 
 TEMPLATES_DIR = BASE_DIR / "templates"
 STATIC_DIR = BASE_DIR / "static"
@@ -45,7 +50,9 @@ async def lifespan(_: FastAPI):
     STATIC_DIR.mkdir(parents=True, exist_ok=True)
     if not os.environ.get("SAHAL_ADMIN_PASSWORD"):
         logger.warning("SAHAL_ADMIN_PASSWORD غير معيّن. استخدم كلمة الدخول الافتراضية من ملف البيئة.")
+    init_camera_services()
     yield
+    shutdown_camera_services()
 
 
 app = FastAPI(title="سهل", lifespan=lifespan)
@@ -498,6 +505,112 @@ async def api_classroom_recognize(
         except ValueError as exc:
             return JSONResponse({"error": str(exc)}, status_code=400)
     return recognize_image(frame, db, classroom)
+
+
+MAX_CAMERA_STREAMS = 4
+_stream_slots = threading.BoundedSemaphore(MAX_CAMERA_STREAMS)
+_camera_recognize_lock = threading.Lock()
+
+
+def _ezviz_or_error():
+    service = get_camera_service("ezviz")
+    if service is None or not service.enabled:
+        return None, JSONResponse({"error": "كاميرا EZVIZ غير مفعّلة على السيرفر."}, status_code=503)
+    return service, None
+
+
+@app.get("/api/cameras/ezviz/status")
+def api_ezviz_status():
+    service, error = _ezviz_or_error()
+    if error:
+        return {"status": "disabled", "camera": "EZVIZ", "intervalMs": FACE_RECOGNITION_INTERVAL_MS}
+    return {**service.get_status(), "intervalMs": FACE_RECOGNITION_INTERVAL_MS}
+
+
+@app.get("/api/cameras/ezviz/frame")
+def api_ezviz_frame(max_width: int = 0):
+    """Latest cached frame. Never opens a connection to the camera."""
+    service, error = _ezviz_or_error()
+    if error:
+        return error
+    result = service.get_jpeg(max_width=max(0, min(max_width, 4096)), quality=90)
+    if result is None:
+        return JSONResponse({"error": "لا توجد صورة حديثة من الكاميرا.", "status": service.get_status()["status"]}, status_code=503)
+    jpeg, seq, ts = result
+    return Response(jpeg, media_type="image/jpeg", headers={"Cache-Control": "no-store", "X-Frame-Seq": str(seq)})
+
+
+@app.get("/api/cameras/ezviz/stream")
+async def api_ezviz_stream(request: Request, fps: int = 8):
+    """MJPEG preview (multipart/x-mixed-replace) built from the cached frames."""
+    service, error = _ezviz_or_error()
+    if error:
+        return error
+    if not _stream_slots.acquire(blocking=False):
+        return JSONResponse({"error": "عدد المشاهدين المتزامنين وصل الحد."}, status_code=429)
+    interval = 1.0 / max(1, min(fps, 15))
+
+    async def frames():
+        last_seq = -1
+        try:
+            while not await request.is_disconnected():
+                result = await run_in_threadpool(service.get_jpeg, 960, 70, last_seq)
+                if result is not None:
+                    jpeg, last_seq, _ = result
+                    yield (
+                        b"--frame\r\nContent-Type: image/jpeg\r\nContent-Length: "
+                        + str(len(jpeg)).encode()
+                        + b"\r\n\r\n"
+                        + jpeg
+                        + b"\r\n"
+                    )
+                await asyncio.sleep(interval)
+        finally:
+            _stream_slots.release()
+
+    return StreamingResponse(
+        frames(),
+        media_type="multipart/x-mixed-replace; boundary=frame",
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.post("/api/cameras/ezviz/recognize")
+def api_ezviz_recognize(classroom_id: int, include_frame: bool = False, db: Session = Depends(get_db)):
+    """Feed the latest EZVIZ frame into the same recognize_image() used by upload/webcam."""
+    service, error = _ezviz_or_error()
+    if error:
+        return error
+    classroom = db.get(Classroom, classroom_id)
+    if not classroom:
+        return JSONResponse({"error": "الصف غير موجود"}, status_code=404)
+    latest = service.get_latest_frame()
+    if latest is None:
+        return JSONResponse({"error": "لا توجد صورة حديثة من الكاميرا.", "status": service.get_status()["status"]}, status_code=503)
+    if not _camera_recognize_lock.acquire(blocking=False):
+        return JSONResponse({"error": "التعرف جارٍ على إطار سابق. حاول بعد لحظة."}, status_code=429)
+    try:
+        frame, seq, frame_ts = latest
+        result = recognize_image(frame, db, classroom)
+    finally:
+        _camera_recognize_lock.release()
+    result.update(
+        {
+            "recognized": any(face["known"] for face in result["faces"]),
+            "camera": service.config.camera_id,
+            "camera_name": service.config.name,
+            "timestamp": now().isoformat(),
+            "frame_seq": seq,
+            "frame_width": int(frame.shape[1]),
+            "frame_height": int(frame.shape[0]),
+        }
+    )
+    if include_frame:
+        shot = service.get_jpeg(max_width=1280, quality=85)
+        if shot is not None and shot[1] == seq:
+            result["frame_jpeg"] = base64.b64encode(shot[0]).decode()
+            result["frame_scale"] = min(1.0, 1280 / frame.shape[1])
+    return result
 
 
 @app.get("/api/students")

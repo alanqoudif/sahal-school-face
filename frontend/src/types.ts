@@ -92,3 +92,37 @@ export type AttendanceResponse = {
   records: AttendanceRow[];
   absent: Student[];
 };
+
+export type CameraState =
+  | "connecting"
+  | "online"
+  | "offline"
+  | "reconnecting"
+  | "authentication_failed"
+  | "stream_error"
+  | "disabled";
+
+export type CameraStatus = {
+  status: CameraState;
+  message?: string;
+  camera: string;
+  cameraId?: string;
+  ip?: string;
+  lastFrameAt?: string | null;
+  width?: number | null;
+  height?: number | null;
+  fps?: number | null;
+  reconnectAttempts?: number;
+  intervalMs: number;
+};
+
+export type IpRecognizeResponse = RecognizeResponse & {
+  recognized: boolean;
+  camera: string;
+  camera_name: string;
+  timestamp: string;
+  frame_width: number;
+  frame_height: number;
+  frame_jpeg?: string;
+  frame_scale?: number;
+};
