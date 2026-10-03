@@ -8,9 +8,9 @@ import type { AttendanceRow, Classroom, FaceMatch, RecognizeResponse } from "../
 
 type Source = "laptop" | "upload" | "ezviz";
 const SOURCES: { id: Source; label: string }[] = [
+  { id: "ezviz", label: "كاميرا EZVIZ" },
   { id: "laptop", label: "كاميرا اللابتوب" },
   { id: "upload", label: "رفع صورة" },
-  { id: "ezviz", label: "كاميرا EZVIZ" },
 ];
 
 export function CameraPage() {
@@ -21,14 +21,14 @@ export function CameraPage() {
   const busyRef = useRef(false);
   const classroomIdRef = useRef<number | undefined>(undefined);
   const pauseUntilRef = useRef(0);
-  const [status, setStatus] = useState("جاري تشغيل كاميرا اللابتوب...");
-  const [scan, setScan] = useState("بعد ما تظهر الصورة، التعرف يشتغل تلقائياً.");
+  const [status, setStatus] = useState("");
+  const [scan, setScan] = useState("التعرف التلقائي شغّال على كل الطلاب في الإطار.");
   const [needsRetry, setNeedsRetry] = useState(false);
   const [present, setPresent] = useState(0);
   const [total, setTotal] = useState(0);
   const [recent, setRecent] = useState<AttendanceRow[]>([]);
   const [lastMatch, setLastMatch] = useState<FaceMatch | null>(null);
-  const [source, setSource] = useState<Source>("laptop");
+  const [source, setSource] = useState<Source>("ezviz");
   const [classrooms, setClassrooms] = useState<Classroom[]>([]);
   const [classroomId, setClassroomId] = useState(searchParams.get("classroom") || "");
   classroomIdRef.current = classroomId ? Number(classroomId) : undefined;

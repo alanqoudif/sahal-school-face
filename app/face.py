@@ -1,6 +1,11 @@
 import json
+import os
+
 import cv2
 import numpy as np
+
+# Larger detector input keeps small faces at the back of a classroom detectable.
+DET_SIZE = int(os.environ.get("SAHAL_DET_SIZE", "1024") or 1024)
 
 _analyzer = None
 
@@ -14,7 +19,7 @@ def get_analyzer():
             name="buffalo_s",
             providers=["CPUExecutionProvider"],
         )
-        analyzer.prepare(ctx_id=-1, det_size=(640, 640))
+        analyzer.prepare(ctx_id=-1, det_size=(DET_SIZE, DET_SIZE))
         _analyzer = analyzer
     return _analyzer
 

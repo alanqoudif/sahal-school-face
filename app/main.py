@@ -223,6 +223,12 @@ def recognize_image(frame, db: Session, classroom: Classroom | None) -> dict:
         total_query = total_query.where(Student.classroom_id == classroom_id)
     total_students = db.scalar(total_query) or 0
 
+    # one query for the whole frame instead of one per face
+    already_present: dict[int, Attendance] = {
+        record.student_id: record
+        for record in db.scalars(select(Attendance).where(Attendance.day == day)).all()
+    }
+
     for face in detect_faces(frame):
         embedding = np.asarray(face.normed_embedding, dtype=np.float32)
         match, score, status = rank_match(embedding, catalog)
@@ -245,9 +251,7 @@ def recognize_image(frame, db: Session, classroom: Classroom | None) -> dict:
         if status == "ambiguous":
             item["name"] = "غير مؤكد"
         if match and status == "matched":
-            existing = db.scalar(
-                select(Attendance).where(Attendance.student_id == match.id, Attendance.day == day)
-            )
+            existing = already_present.get(match.id)
             marked_now = False
             if existing is None and match.id not in marked_ids:
                 db.add(
